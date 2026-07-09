@@ -1,11 +1,13 @@
 //! Symbolic residual construction, folding, and simplification (M5).
 
 use num_rational::Ratio;
-use num_traits::{CheckedAdd, One, Zero};
+use num_traits::{CheckedAdd, CheckedSub, One};
 
 use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::dim::{BaseDim, Dimension};
 use crate::eval::constraint::{unify_additive_terms, validate_node};
+use crate::eval::lint_sink::LintSink;
+use crate::eval::mag::Mag;
 use crate::eval::units::{combine_mul, dimension_of_unit, unify_add, unify_sub};
 use crate::eval::value::{
     ConstraintSet, Quantity, SymBinaryOp, SymExpr, SymNode, SymUnaryOp, Symbol, Value,
@@ -42,43 +44,49 @@ pub fn add_like(
     registry: &Registry,
     span: Span,
     add: bool,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match (lhs, rhs) {
         (Value::Known(l), Value::Known(r)) => {
             let q = if add {
-                unify_add(l, r, registry, span)?
+                unify_add(l, r, registry, span, lints)?
             } else {
-                unify_sub(l, r, registry, span)?
+                unify_sub(l, r, registry, span, lints)?
             };
             Ok(Value::Known(q))
         }
-        (Value::Known(k), Value::Symbolic(s)) | (Value::Symbolic(s), Value::Known(k)) => {
-            let (known, sym, flip) = if matches!(lhs, Value::Known(_)) {
-                (k, s, false)
-            } else if add {
-                (k, s, true)
-            } else {
-                return Err(Diag::new(Diagnostic::error(
-                    ErrorCode::Eval,
-                    "cannot subtract a known quantity from a symbolic residual",
-                    span,
-                )));
-            };
-            let mut constraints = sym.constraints.clone();
-            let left = if flip {
-                sym.root.clone()
-            } else {
-                SymNode::Known(known.clone())
-            };
-            let right = if flip {
-                SymNode::Known(known.clone())
-            } else {
-                sym.root.clone()
-            };
+        (Value::Known(k), Value::Symbolic(s)) => {
+            let mut constraints = s.constraints.clone();
+            let left = SymNode::Known(k.clone());
+            let right = s.root.clone();
             let op = if add { SymBinaryOp::Add } else { SymBinaryOp::Sub };
             unify_additive_terms(&left, &right, &mut constraints, span)?;
             let root = simplify(SymNode::Binary {
                 op,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
+            Ok(finish_symbolic(root, constraints))
+        }
+        (Value::Symbolic(s), Value::Known(k)) if add => {
+            let mut constraints = s.constraints.clone();
+            let left = s.root.clone();
+            let right = SymNode::Known(k.clone());
+            unify_additive_terms(&left, &right, &mut constraints, span)?;
+            let root = simplify(SymNode::Binary {
+                op: SymBinaryOp::Add,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
+            Ok(finish_symbolic(root, constraints))
+        }
+        (Value::Symbolic(s), Value::Known(k)) => {
+            let mut constraints = s.constraints.clone();
+            let left = s.root.clone();
+            let right = SymNode::Known(k.clone());
+            unify_additive_terms(&left, &right, &mut constraints, span)?;
+            let root = simplify(SymNode::Binary {
+                op: SymBinaryOp::Sub,
                 left: Box::new(left),
                 right: Box::new(right),
             });
@@ -104,13 +112,14 @@ pub fn mul_div(
     _registry: &Registry,
     span: Span,
     mul: bool,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match (lhs, rhs) {
         (Value::Known(l), Value::Known(r)) => {
             let q = if mul {
-                combine_mul(l, r, span)?
+                combine_mul(l, r, span, lints)?
             } else {
-                crate::eval::units::combine_div(l, r, span)?
+                crate::eval::units::combine_div(l, r, span, lints)?
             };
             Ok(Value::Known(q))
         }
@@ -120,7 +129,7 @@ pub fn mul_div(
             } else {
                 (k, s, true)
             };
-            let folded = fold_known_coefficient(known, &sym.root, flip, mul)?;
+            let folded = fold_known_coefficient(known, &sym.root, flip, mul, lints)?;
             Ok(finish_symbolic(folded, sym.constraints.clone()))
         }
         (Value::Symbolic(l), Value::Symbolic(r)) => {
@@ -137,13 +146,21 @@ pub fn mul_div(
 }
 
 /// Partial exponentiation (known exponent only).
-pub fn pow(lhs: &Value, rhs: &Value, span: Span) -> Result<Value, Diag> {
+pub fn pow(lhs: &Value, rhs: &Value, span: Span, lints: &mut LintSink) -> Result<Value, Diag> {
     match (lhs, rhs) {
         (Value::Known(l), Value::Known(r)) => {
-            Ok(Value::Known(crate::eval::units::combine_pow(l, r, span)?))
+            Ok(Value::Known(crate::eval::units::combine_pow(l, r, span, lints)?))
         }
         (Value::Symbolic(s), Value::Known(r)) if r.dim.is_dimensionless() => {
-            if r.magnitude.denom() != &1 {
+            if let Some(ratio) = r.exact_ratio() {
+                if ratio.denom() != &1 {
+                    return Err(Diag::new(Diagnostic::error(
+                        ErrorCode::Eval,
+                        "symbolic exponent must be an integer",
+                        span,
+                    )));
+                }
+            } else {
                 return Err(Diag::new(Diagnostic::error(
                     ErrorCode::Eval,
                     "symbolic exponent must be an integer",
@@ -166,10 +183,10 @@ pub fn pow(lhs: &Value, rhs: &Value, span: Span) -> Result<Value, Diag> {
 }
 
 /// Unary negation on values.
-pub fn neg(value: &Value, _span: Span) -> Result<Value, Diag> {
+pub fn neg(value: &Value, _span: Span, _lints: &mut LintSink) -> Result<Value, Diag> {
     match value {
         Value::Known(q) => Ok(Value::Known(Quantity::new(
-            -q.effective_magnitude(),
+            q.mag.neg(),
             q.unit.clone(),
             q.dim.clone(),
         ))),
@@ -245,6 +262,7 @@ fn fold_known_coefficient(
     sym_root: &SymNode,
     flip: bool,
     mul: bool,
+    lints: &mut LintSink,
 ) -> Result<SymNode, Diag> {
     if mul && !known.dim.is_dimensionless() {
         let left = SymNode::Known(known.clone());
@@ -281,7 +299,7 @@ fn fold_known_coefficient(
     }
 
     match sym_root {
-        SymNode::Known(q) => Ok(SymNode::Known(combine_mul(known, q, Span::empty(0))?)),
+        SymNode::Known(q) => Ok(SymNode::Known(combine_mul(known, q, Span::empty(0), lints)?)),
         _ => Ok(SymNode::Binary {
             op: SymBinaryOp::Mul,
             left: Box::new(if flip {
@@ -329,7 +347,7 @@ pub fn simplify(node: SymNode) -> SymNode {
             let inner = simplify(*operand);
             match inner {
                 SymNode::Known(q) => SymNode::Known(Quantity::new(
-                    -q.effective_magnitude(),
+                    q.mag.neg(),
                     q.unit.clone(),
                     q.dim.clone(),
                 )),
@@ -370,9 +388,15 @@ fn simplify_add(left: SymNode, right: SymNode) -> SymNode {
         return left;
     }
     if let (SymNode::Known(l), SymNode::Known(r)) = (&left, &right) {
-        if l.dim == r.dim && l.unit == r.unit && l.float_mag.is_none() && r.float_mag.is_none() {
-            if let Some(sum) = l.effective_magnitude().checked_add(&r.effective_magnitude()) {
-                return SymNode::Known(Quantity::new(sum, l.unit.clone(), l.dim.clone()));
+        if l.dim == r.dim && l.unit == r.unit && l.is_exact() && r.is_exact() {
+            if let (Mag::Exact(lm), Mag::Exact(rm)) = (l.mag, r.mag) {
+                if let Some(sum) = lm.checked_add(&rm) {
+                    return SymNode::Known(Quantity::new(
+                        Mag::Exact(sum),
+                        l.unit.clone(),
+                        l.dim.clone(),
+                    ));
+                }
             }
         }
     }
@@ -386,6 +410,19 @@ fn simplify_add(left: SymNode, right: SymNode) -> SymNode {
 fn simplify_sub(left: SymNode, right: SymNode) -> SymNode {
     if is_zero(&right) {
         return left;
+    }
+    if let (SymNode::Known(l), SymNode::Known(r)) = (&left, &right) {
+        if l.dim == r.dim && l.unit == r.unit && l.is_exact() && r.is_exact() {
+            if let (Mag::Exact(lm), Mag::Exact(rm)) = (l.mag, r.mag) {
+                if let Some(diff) = lm.checked_sub(&rm) {
+                    return SymNode::Known(Quantity::new(
+                        Mag::Exact(diff),
+                        l.unit.clone(),
+                        l.dim.clone(),
+                    ));
+                }
+            }
+        }
     }
     SymNode::Binary {
         op: SymBinaryOp::Sub,
@@ -402,7 +439,8 @@ fn simplify_mul(left: SymNode, right: SymNode) -> SymNode {
         return left;
     }
     if let (SymNode::Known(l), SymNode::Known(r)) = (&left, &right) {
-        if let Ok(q) = combine_mul(l, r, Span::empty(0)) {
+        let mut sink = LintSink::new();
+        if let Ok(q) = combine_mul(l, r, Span::empty(0), &mut sink) {
             return SymNode::Known(q);
         }
     }
@@ -424,14 +462,14 @@ fn simplify_div(left: SymNode, right: SymNode) -> SymNode {
 fn is_zero(node: &SymNode) -> bool {
     matches!(
         node,
-        SymNode::Known(q) if q.dim.is_dimensionless() && q.effective_magnitude().is_zero()
+        SymNode::Known(q) if q.dim.is_dimensionless() && q.mag.is_zero()
     )
 }
 
 fn is_one(node: &SymNode) -> bool {
     matches!(
         node,
-        SymNode::Known(q) if q.dim.is_dimensionless() && q.effective_magnitude() == Ratio::from_integer(1)
+        SymNode::Known(q) if q.dim.is_dimensionless() && q.exact_ratio() == Some(Ratio::from_integer(1))
     )
 }
 
@@ -489,17 +527,10 @@ fn format_node(node: &SymNode) -> String {
 }
 
 fn format_quantity_text(q: &Quantity) -> String {
-    if q.float_mag.is_some() {
-        format!("{} {}", q.as_f64(), q.unit.as_str())
-    } else if q.magnitude.denom() == &1 {
-        format!("{} {}", q.magnitude.numer(), q.unit.as_str())
-    } else {
-        format!(
-            "{}/{} {}",
-            q.magnitude.numer(),
-            q.magnitude.denom(),
-            q.unit.as_str()
-        )
+    match q.mag {
+        Mag::Float(f) => format!("{f} {}", q.unit.as_str()),
+        Mag::Exact(r) if r.denom() == &1 => format!("{} {}", r.numer(), q.unit.as_str()),
+        Mag::Exact(r) => format!("{}/{} {}", r.numer(), r.denom(), q.unit.as_str()),
     }
 }
 
@@ -514,11 +545,11 @@ pub fn quantity_from_literal(
         d.0.span = span;
         d
     })?;
-    Ok(Value::Known(Quantity::new(magnitude, unit, dim)))
+    Ok(Value::Known(Quantity::from_exact(magnitude, unit, dim)))
 }
 
 pub fn length_literal(inches: Ratio<i128>) -> Value {
-    Value::Known(Quantity::new(
+    Value::Known(Quantity::from_exact(
         inches,
         UnitExpr::named("in"),
         Dimension::single(BaseDim::Length, Ratio::one()),
@@ -526,7 +557,7 @@ pub fn length_literal(inches: Ratio<i128>) -> Value {
 }
 
 pub fn dimensionless_number(value: Ratio<i128>) -> Value {
-    Value::Known(Quantity::new(
+    Value::Known(Quantity::from_exact(
         value,
         UnitExpr::one(),
         Dimension::dimensionless(),

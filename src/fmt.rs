@@ -6,6 +6,7 @@ use num_rational::Ratio;
 use num_traits::{One, Zero};
 
 use crate::dim::BaseDim;
+use crate::eval::mag::Mag;
 use crate::eval::units::magnitude_in_anchor_units;
 use crate::eval::value::Quantity;
 use crate::quantity::UnitExpr;
@@ -76,38 +77,37 @@ fn format_length_ft_in(
 ) -> Result<String, crate::Diag> {
     let inches_unit = UnitExpr::named("in");
     let in_q = q.convert_to(&inches_unit, registry)?;
-    if in_q.float_mag.is_none() {
-        if let Some(s) = ftin::render_inches_exact(in_q.effective_magnitude(), opts.ft_in_denominator)
-        {
-            return Ok(s);
+    if in_q.is_exact() {
+        if let Some(r) = in_q.exact_ratio() {
+            if let Some(s) = ftin::render_inches_exact(r, opts.ft_in_denominator) {
+                return Ok(s);
+            }
         }
     }
     let anchor = magnitude_in_anchor_units(&in_q, registry)?;
-    let total = if in_q.float_mag.is_some() {
-        in_q.as_f64()
-    } else {
-        let n: f64 = num_traits::ToPrimitive::to_f64(anchor.numer()).unwrap_or(0.0);
-        let d: f64 = num_traits::ToPrimitive::to_f64(anchor.denom()).unwrap_or(1.0);
-        n / d
+    let total = match in_q.mag {
+        Mag::Float(f) => f,
+        Mag::Exact(_) => {
+            let n: f64 = num_traits::ToPrimitive::to_f64(anchor.numer()).unwrap_or(0.0);
+            let d: f64 = num_traits::ToPrimitive::to_f64(anchor.denom()).unwrap_or(1.0);
+            n / d
+        }
     };
     Ok(ftin::render_inches(total, opts.ft_in_denominator))
 }
 
 fn format_magnitude_unit(q: &Quantity, opts: &FmtOptions) -> String {
     let unit = format!("{}", q.unit);
-    if q.float_mag.is_some() {
-        return format!("{:.prec$} {unit}", q.as_f64(), prec = opts.precision);
-    }
-    if q.magnitude.is_zero() {
-        return format!("0 {unit}");
-    }
-    if q.magnitude.denom() == &1i128 {
-        format!("{} {unit}", q.magnitude.numer())
-    } else {
-        format!(
-            "{}/{} {unit}",
-            q.magnitude.numer(),
-            q.magnitude.denom()
-        )
+    match q.mag {
+        Mag::Float(f) => format!("{f:.prec$} {unit}", prec = opts.precision),
+        Mag::Exact(r) => {
+            if r.is_zero() {
+                format!("0 {unit}")
+            } else if r.denom() == &1i128 {
+                format!("{} {unit}", r.numer())
+            } else {
+                format!("{}/{} {unit}", r.numer(), r.denom())
+            }
+        }
     }
 }

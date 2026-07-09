@@ -5,6 +5,7 @@ use num_traits::One;
 
 use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, Span};
 use crate::dim::{BaseDim, Dimension};
+use crate::eval::mag::Mag;
 use crate::eval::value::Quantity;
 use crate::lexer::{lex, SpannedToken, Token};
 use crate::quantity::UnitExpr;
@@ -89,7 +90,15 @@ impl<'a> DefExprParser<'a> {
         if matches!(self.peek(), Some(Token::Minus)) {
             self.bump();
             let mut q = self.parse_pow()?;
-            q.magnitude = -q.magnitude;
+            if let Mag::Exact(r) = q.mag {
+                q.mag = Mag::Exact(-r);
+            } else {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::DefSymbolic,
+                    "definition expressions must be exact",
+                    self.span(),
+                )));
+            }
             return Ok(q);
         }
         self.parse_pow()
@@ -107,14 +116,23 @@ impl<'a> DefExprParser<'a> {
                     self.span(),
                 )));
             }
-            let exp = ratio_to_i32(&right.magnitude)?;
+            let exp = ratio_to_i32(&qty_mag(&right)?)?;
             left.dim = left.dim.pow(exp);
             let exp_i = *exp.numer();
-            if exp_i >= 0 {
-                left.magnitude = left.magnitude.pow(exp_i);
-            } else {
-                left.magnitude = Ratio::one() / left.magnitude.pow(-exp_i);
-            }
+            left.mag = match left.mag {
+                Mag::Exact(r) => Mag::Exact(if exp_i >= 0 {
+                    r.pow(exp_i)
+                } else {
+                    Ratio::one() / r.pow(-exp_i)
+                }),
+                Mag::Float(_) => {
+                    return Err(Diag::new(Diagnostic::error(
+                        ErrorCode::DefSymbolic,
+                        "definition expressions must be exact",
+                        self.span(),
+                    )));
+                }
+            };
         }
         Ok(left)
     }
@@ -132,14 +150,14 @@ impl<'a> DefExprParser<'a> {
                         | Some(Token::FtIn { .. })
                 ) {
                     let (unit_expr, dim) = self.parse_unit_expr()?;
-                    return Ok(Quantity::new(n, unit_expr, dim));
+                    return Ok(Quantity::from_exact(n, unit_expr, dim));
                 }
-                Ok(Quantity::new(n, UnitExpr::one(), Dimension::dimensionless()))
+                Ok(Quantity::from_exact(n, UnitExpr::one(), Dimension::dimensionless()))
             }
             Some(Token::Feet { inches, .. }) => {
                 let inches = *inches;
                 self.bump();
-                Ok(Quantity::new(
+                Ok(Quantity::from_exact(
                     inches,
                     UnitExpr::named("ft"),
                     Dimension::single(BaseDim::Length, Ratio::one()),
@@ -148,7 +166,7 @@ impl<'a> DefExprParser<'a> {
             Some(Token::Inches { inches, .. }) => {
                 let inches = *inches;
                 self.bump();
-                Ok(Quantity::new(
+                Ok(Quantity::from_exact(
                     inches,
                     UnitExpr::named("in"),
                     Dimension::single(BaseDim::Length, Ratio::one()),
@@ -157,7 +175,7 @@ impl<'a> DefExprParser<'a> {
             Some(Token::FtIn { inches, .. }) => {
                 let inches = *inches;
                 self.bump();
-                Ok(Quantity::new(
+                Ok(Quantity::from_exact(
                     inches,
                     UnitExpr::named("ft"),
                     Dimension::single(BaseDim::Length, Ratio::one()),
@@ -165,7 +183,7 @@ impl<'a> DefExprParser<'a> {
             }
             Some(Token::Ident(_)) => {
                 let (unit_expr, dim) = self.parse_unit_expr()?;
-                Ok(Quantity::new(Ratio::one(), unit_expr, dim))
+                Ok(Quantity::from_exact(Ratio::one(), unit_expr, dim))
             }
             Some(Token::LParen) => {
                 self.bump();
@@ -243,7 +261,7 @@ impl<'a> DefExprParser<'a> {
         if matches!(self.peek(), Some(Token::Caret)) {
             self.bump();
             let exp_qty = self.parse_unary()?;
-            let exp = ratio_to_i32(&exp_qty.magnitude)?;
+            let exp = ratio_to_i32(&qty_mag(&exp_qty)?)?;
             let exp_i = *exp.numer();
             dim = dim.pow(exp);
             unit = UnitExpr::Pow {
@@ -256,14 +274,15 @@ impl<'a> DefExprParser<'a> {
 }
 
 fn combine_quantities(left: Quantity, right: Quantity, op: &Token) -> Result<Quantity, Diag> {
+    let (lm, rm) = (qty_mag(&left)?, qty_mag(&right)?);
     match op {
-        Token::Star | Token::UnitMul => Ok(Quantity::new(
-            left.magnitude * right.magnitude,
+        Token::Star | Token::UnitMul => Ok(Quantity::from_exact(
+            lm * rm,
             compose_unit_expr(&left.unit, &right.unit, true),
             left.dim.mul(&right.dim),
         )),
-        Token::Slash => Ok(Quantity::new(
-            left.magnitude / right.magnitude,
+        Token::Slash => Ok(Quantity::from_exact(
+            lm / rm,
             compose_unit_expr(&left.unit, &right.unit, false),
             left.dim.div(&right.dim),
         )),
@@ -296,6 +315,16 @@ fn compose_unit_expr(lhs: &UnitExpr, rhs: &UnitExpr, mul: bool) -> UnitExpr {
     }
 }
 
+fn qty_mag(q: &Quantity) -> Result<Ratio<i128>, Diag> {
+    q.mag.exact_ratio().ok_or_else(|| {
+        Diag::new(Diagnostic::error(
+            ErrorCode::DefSymbolic,
+            "definition expressions must be exact",
+            Span::empty(0),
+        ))
+    })
+}
+
 fn ratio_to_i32(r: &Ratio<i128>) -> Result<Ratio<i32>, Diag> {
     if r.denom() != &1i128 {
         return Err(Diag::new(Diagnostic::error(
@@ -324,6 +353,6 @@ mod tests {
         let reg = RegistryBuilder::from_seed().freeze();
         let lookup = UnitLookup::from_registry(&reg);
         let q = eval_def_expr("1000 lbf", &lookup).unwrap();
-        assert_eq!(q.magnitude, Ratio::from_integer(1000));
+        assert_eq!(q.exact_ratio(), Some(Ratio::from_integer(1000)));
     }
 }

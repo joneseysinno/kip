@@ -73,7 +73,7 @@ pub enum Token {
     ColonColon,
     /// `:` (registry primary-unit form)
     Colon,
-    /// `>=` `<=` `>` `<` `==` (reserved v1.1)
+    /// `>=` (reserved v1.1).
     Gte,
     /// `<=` (reserved v1.1).
     Lte,

@@ -80,7 +80,7 @@ fn bind_resolves_remaining_symbol() {
     );
     let v = residual.bind(&full).expect("bind");
     let q = v.quantity().expect("fully known");
-    assert_eq!(q.magnitude, Ratio::from_integer(4900));
+    assert_eq!(q.exact_ratio(), Some(Ratio::from_integer(4900)));
     assert_eq!(q.unit.as_str(), "psi");
 }
 

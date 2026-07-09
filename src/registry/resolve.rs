@@ -38,7 +38,7 @@ pub fn topo_sort(defs: &[PendingDefine]) -> Result<Vec<usize>, Vec<Diag>> {
 
     let mut queue: VecDeque<String> = indegree
         .iter()
-        .filter(|(_, &deg)| deg == 0)
+        .filter(|&(_, deg)| *deg == 0)
         .map(|(k, _)| k.clone())
         .collect();
     queue.make_contiguous().sort();

@@ -54,7 +54,7 @@ mod resolver;
 
 pub use diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Severity, Span};
 pub use dim::{BaseDim, CustomDimId, Dimension};
-pub use eval::{eval, Value};
+pub use eval::{eval, eval_checked, EvalOutcome, LintSink, Mag, Value};
 pub use eval::value::{ConstraintSet, EquationProvenance, Quantity, SymBinaryOp, SymExpr, SymNode, SymUnaryOp, Symbol};
 pub use fmt::{format_quantity, FmtOptions};
 pub use lexer::{lex, lex_checked, LexOutcome, LexSpan, SpannedToken, Token};

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
+use crate::eval::lint_sink::LintSink;
 use crate::eval::value::Value;
 use crate::eval::builtins::eval_builtin;
 use crate::eval::partial::{
@@ -24,13 +25,24 @@ pub const PARALLEL_THRESHOLD: usize = 32;
 pub const PARALLEL_THRESHOLD: usize = usize::MAX;
 
 /// Evaluate `expr` against a frozen registry and symbol resolver.
+#[allow(dead_code)]
 pub(crate) fn eval_known(
     expr: &Expr,
     registry: &Registry,
     resolver: &dyn Resolver,
 ) -> Result<Value, Diag> {
+    eval_known_checked(expr, registry, resolver, &mut LintSink::new())
+}
+
+/// Evaluate and collect lints into `lints`.
+pub(crate) fn eval_known_checked(
+    expr: &Expr,
+    registry: &Registry,
+    resolver: &dyn Resolver,
+    lints: &mut LintSink,
+) -> Result<Value, Diag> {
     let sizes = compute_subtree_sizes(expr);
-    let mut values = eval_tree(expr, expr.root, registry, resolver, &sizes)?;
+    let mut values = eval_tree(expr, expr.root, registry, resolver, &sizes, lints)?;
     let root = values
         .remove(&expr.root)
         .ok_or_else(|| Diag::new(Diagnostic::error(ErrorCode::Eval, "empty expression", Span::empty(0))))?;
@@ -43,6 +55,7 @@ fn eval_tree(
     registry: &Registry,
     resolver: &dyn Resolver,
     sizes: &[usize],
+    lints: &mut LintSink,
 ) -> Result<HashMap<NodeId, Value>, Diag> {
     #[cfg(feature = "parallel")]
     {
@@ -51,12 +64,25 @@ fn eval_tree(
                 && sizes[right.0 as usize] >= PARALLEL_THRESHOLD
             {
                 let span = expr.node(id).span;
-                let (left_map, right_map) = rayon::join(
-                    || eval_tree(expr, *left, registry, resolver, sizes),
-                    || eval_tree(expr, *right, registry, resolver, sizes),
+                let (left_result, right_result) = rayon::join(
+                    || {
+                        let mut branch_lints = LintSink::new();
+                        let map = eval_tree(expr, *left, registry, resolver, sizes, &mut branch_lints);
+                        (map, branch_lints)
+                    },
+                    || {
+                        let mut branch_lints = LintSink::new();
+                        let map = eval_tree(expr, *right, registry, resolver, sizes, &mut branch_lints);
+                        (map, branch_lints)
+                    },
                 );
+                let (left_map, mut left_lints) = left_result;
+                let (right_map, mut right_lints) = right_result;
                 let mut values = left_map?;
-                values.extend(right_map?);
+                let right_map = right_map?;
+                lints.extend(&mut left_lints);
+                lints.extend(&mut right_lints);
+                values.extend(right_map);
                 let lhs = values
                     .get(left)
                     .cloned()
@@ -65,13 +91,13 @@ fn eval_tree(
                     .get(right)
                     .cloned()
                     .ok_or_else(|| missing_child(span))?;
-                values.insert(id, eval_binary(*op, &lhs, &rhs, registry, span)?);
+                values.insert(id, eval_binary(*op, &lhs, &rhs, registry, span, lints)?);
                 return Ok(values);
             }
         }
     }
 
-    eval_sequential(expr, id, registry, resolver)
+    eval_sequential(expr, id, registry, resolver, lints)
 }
 
 fn eval_sequential(
@@ -79,12 +105,13 @@ fn eval_sequential(
     root: NodeId,
     registry: &Registry,
     resolver: &dyn Resolver,
+    lints: &mut LintSink,
 ) -> Result<HashMap<NodeId, Value>, Diag> {
     let order = postorder(expr, root);
     let mut values: HashMap<NodeId, Value> = HashMap::with_capacity(order.len());
 
     for node_id in order {
-        let value = eval_node(expr, node_id, &values, registry, resolver)?;
+        let value = eval_node(expr, node_id, &values, registry, resolver, lints)?;
         values.insert(node_id, value);
     }
 
@@ -97,6 +124,7 @@ fn eval_node(
     values: &HashMap<NodeId, Value>,
     registry: &Registry,
     resolver: &dyn Resolver,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     let span = expr.node(id).span;
     match &expr.node(id).kind {
@@ -111,15 +139,17 @@ fn eval_node(
         ExprKind::Unary { op, operand } => {
             let v = values.get(operand).ok_or(missing_child(span))?;
             match op {
-                UnaryOp::Neg => neg(v, span),
+                UnaryOp::Neg => neg(v, span, lints),
             }
         }
         ExprKind::Binary { op, left, right } => {
             let lhs = values.get(left).ok_or(missing_child(span))?;
             let rhs = values.get(right).ok_or(missing_child(span))?;
-            eval_binary(*op, lhs, rhs, registry, span)
+            eval_binary(*op, lhs, rhs, registry, span, lints)
         }
-        ExprKind::Call { callee, args } => eval_call(callee, args, values, registry, resolver, span),
+        ExprKind::Call { callee, args } => {
+            eval_call(callee, args, values, registry, resolver, span, lints)
+        }
     }
 }
 
@@ -129,6 +159,7 @@ fn eval_binary(
     rhs: &Value,
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match op {
         BinaryOp::Cmp(_) => Err(Diag::new(Diagnostic::error(
@@ -136,11 +167,11 @@ fn eval_binary(
             "comparison operators are reserved for v1.1",
             span,
         ))),
-        BinaryOp::Add => add_like(lhs, rhs, registry, span, true),
-        BinaryOp::Sub => add_like(lhs, rhs, registry, span, false),
-        BinaryOp::Mul => mul_div(lhs, rhs, registry, span, true),
-        BinaryOp::Div => mul_div(lhs, rhs, registry, span, false),
-        BinaryOp::Pow => pow(lhs, rhs, span),
+        BinaryOp::Add => add_like(lhs, rhs, registry, span, true, lints),
+        BinaryOp::Sub => add_like(lhs, rhs, registry, span, false, lints),
+        BinaryOp::Mul => mul_div(lhs, rhs, registry, span, true, lints),
+        BinaryOp::Div => mul_div(lhs, rhs, registry, span, false, lints),
+        BinaryOp::Pow => pow(lhs, rhs, span, lints),
     }
 }
 
@@ -151,18 +182,19 @@ fn eval_call(
     registry: &Registry,
     resolver: &dyn Resolver,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match callee {
         Callee::Path(path) => {
             #[cfg(feature = "packs")]
             {
                 crate::packs::call::eval_equation_call(
-                    path, args, values, registry, resolver, span,
+                    path, args, values, registry, resolver, span, lints,
                 )
             }
             #[cfg(not(feature = "packs"))]
             {
-                let _ = (path, args, values, registry, resolver);
+                let _ = (path, args, values, registry, resolver, lints);
                 Err(Diag::new(Diagnostic::error(
                     ErrorCode::UnknownEq,
                     "code equations require the `packs` feature",
@@ -186,7 +218,7 @@ fn eval_call(
                     }
                 }
             }
-            eval_builtin(name, &positional, registry, span)
+            eval_builtin(name, &positional, registry, span, lints)
         }
     }
 }

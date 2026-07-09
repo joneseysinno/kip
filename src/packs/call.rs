@@ -1,12 +1,14 @@
 //! Evaluate a code-equation call (`ACI.fr(fc: …, lambda: …)`).
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, Span};
-use crate::eval::known::eval_known;
+use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Span};
+use crate::eval::known::eval_known_checked;
+use crate::eval::lint_sink::LintSink;
 use crate::eval::partial::finalize;
-use crate::eval::units::convert_quantity;
+use crate::eval::units::{convert_quantity, mag_cmp};
 use crate::eval::value::{ConstraintSet, Quantity, Value};
 use crate::packs::contract::RangeSeverity;
 use crate::packs::equation::EquationRecord;
@@ -23,6 +25,7 @@ pub fn eval_equation_call(
     registry: &Registry,
     resolver: &dyn Resolver,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     let eq = registry
         .equations()
@@ -43,6 +46,18 @@ pub fn eval_equation_call(
         )));
     }
 
+    for arg in args {
+        if let CallArg::Named { name, .. } = arg {
+            if !eq.args.contains_key(name) {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::Eval,
+                    format!("unknown argument `{name}` for equation `{}`", eq.path_key),
+                    span,
+                )));
+            }
+        }
+    }
+
     let mut bindings = BTreeMap::new();
     let mut constraints = ConstraintSet::new();
 
@@ -55,7 +70,7 @@ pub fn eval_equation_call(
         let arg_value = if let Some(id) = provided {
             values.get(&id).cloned().ok_or(missing_child(span))?
         } else if let Some(default) = &contract.default_expr {
-            eval_known(default.as_ref(), registry, resolver)?
+            eval_known_checked(default.as_ref(), registry, resolver, lints)?
         } else {
             return Err(Diag::new(Diagnostic::error(
                 ErrorCode::Eval,
@@ -71,23 +86,12 @@ pub fn eval_equation_call(
             registry,
             span,
             &mut constraints,
+            lints,
         )?;
         bindings.insert(name.clone(), prepared);
     }
 
-    for arg in args {
-        if let CallArg::Named { name, .. } = arg {
-            if !eq.args.contains_key(name) {
-                return Err(Diag::new(Diagnostic::error(
-                    ErrorCode::Eval,
-                    format!("unknown argument `{name}` for equation `{}`", eq.path_key),
-                    span,
-                )));
-            }
-        }
-    }
-
-  let result = eval_with_bindings(eq, &bindings, registry, resolver, span)?;
+    let result = eval_with_bindings(eq, &bindings, registry, resolver, span, lints)?;
 
     match result {
         Value::Known(mut q) => {
@@ -121,6 +125,7 @@ fn prepare_arg(
     registry: &Registry,
     span: Span,
     constraints: &mut ConstraintSet,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match value {
         Value::Known(q) => {
@@ -140,7 +145,7 @@ fn prepare_arg(
                     ]),
                 ));
             }
-            check_range(q, contract, eq, registry, span)?;
+            check_range(q, contract, eq, registry, span, lints)?;
             let converted = convert_quantity(q, &contract.unit, registry)?;
             Ok(Value::Known(converted))
         }
@@ -159,29 +164,30 @@ fn check_range(
     eq: &EquationRecord,
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<(), Diag> {
     let Some(range) = &contract.range else {
         return Ok(());
     };
     let in_contract = convert_quantity(q, &contract.unit, registry)?;
-    let mag = in_contract.effective_magnitude();
+    let mag = in_contract.mag;
     let below = range
         .min
         .as_ref()
-        .is_some_and(|m| mag < m.effective_magnitude());
+        .is_some_and(|m| mag_cmp(mag, m.mag) == Some(Ordering::Less));
     let above = range
         .max
         .as_ref()
-        .is_some_and(|m| mag > m.effective_magnitude());
-    if (below || above) && range.severity == RangeSeverity::Error {
-        return Err(Diag::new(Diagnostic::error(
-            ErrorCode::Range,
-            format!(
-                "argument `{}` is outside the valid range for `{}` ({})",
-                contract.name, eq.path_key, eq.provenance.cite
-            ),
-            span,
-        )));
+        .is_some_and(|m| mag_cmp(mag, m.mag) == Some(Ordering::Greater));
+    if below || above {
+        let msg = format!(
+            "argument `{}` is outside the valid range for `{}` ({})",
+            contract.name, eq.path_key, eq.provenance.cite
+        );
+        if range.severity == RangeSeverity::Error {
+            return Err(Diag::new(Diagnostic::error(ErrorCode::Range, msg, span)));
+        }
+        lints.push(Diag::new(Diagnostic::lint(LintCode::Range, msg, span)));
     }
     Ok(())
 }
@@ -192,12 +198,13 @@ fn eval_with_bindings(
     registry: &Registry,
     outer: &dyn Resolver,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     let resolver = BindingResolver {
         bindings,
         outer,
     };
-    eval_known(eq.body.as_ref(), registry, &resolver).map_err(|e| {
+    eval_known_checked(eq.body.as_ref(), registry, &resolver, lints).map_err(|e| {
         if e.diagnostic().code == ErrorCode::Eval.as_str() {
             Diag::new(Diagnostic::error(
                 ErrorCode::PackBody,

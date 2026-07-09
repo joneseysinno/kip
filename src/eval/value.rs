@@ -6,6 +6,7 @@ use std::sync::Arc;
 use num_rational::Ratio;
 
 use crate::diag::Span;
+use crate::eval::mag::Mag;
 use crate::dim::Dimension;
 use crate::quantity::UnitExpr;
 use crate::{Diag, Resolver};
@@ -176,10 +177,8 @@ pub enum Value {
 /// base form. Conversion happens only at unification points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quantity {
-    /// Exact rational magnitude when available.
-    pub magnitude: Ratio<i128>,
-    /// Set when exactness was lost; stays float thereafter.
-    pub float_mag: Option<f64>,
+    /// Exact rational or float magnitude.
+    pub mag: Mag,
     /// Unit as written by the user.
     pub unit: UnitExpr,
     /// Cached dimension vector.
@@ -189,36 +188,45 @@ pub struct Quantity {
 }
 
 impl Quantity {
-    /// Construct a known exact quantity.
-    pub fn new(magnitude: Ratio<i128>, unit: UnitExpr, dim: Dimension) -> Self {
+    /// Construct a quantity with an explicit magnitude.
+    pub fn new(mag: Mag, unit: UnitExpr, dim: Dimension) -> Self {
         Self {
-            magnitude,
-            float_mag: None,
+            mag,
             unit,
             dim,
             provenance: None,
         }
     }
 
+    /// Construct an exact known quantity.
+    pub fn from_exact(magnitude: Ratio<i128>, unit: UnitExpr, dim: Dimension) -> Self {
+        Self::new(Mag::exact(magnitude), unit, dim)
+    }
+
     /// Construct from integer numerator with named unit and dimension.
     pub fn from_int(n: i128, unit: impl Into<String>, dim: Dimension) -> Self {
-        Self::new(Ratio::from_integer(n), UnitExpr::named(unit), dim)
+        Self::from_exact(Ratio::from_integer(n), UnitExpr::named(unit), dim)
+    }
+
+    /// Construct a float-tainted quantity (rejects non-finite).
+    #[allow(clippy::result_unit_err)]
+    pub fn from_float(f: f64, unit: UnitExpr, dim: Dimension) -> Result<Self, ()> {
+        Ok(Self::new(Mag::float(f)?, unit, dim))
     }
 
     /// Whether this value still has exact rational magnitude.
     pub fn is_exact(&self) -> bool {
-        self.float_mag.is_none()
+        self.mag.is_exact()
     }
 
     /// Effective magnitude as `f64` (exact values converted lossily for display).
     pub fn as_f64(&self) -> f64 {
-        if let Some(f) = self.float_mag {
-            f
-        } else {
-            let n: f64 = num_traits::ToPrimitive::to_f64(self.magnitude.numer()).unwrap_or(0.0);
-            let d: f64 = num_traits::ToPrimitive::to_f64(self.magnitude.denom()).unwrap_or(1.0);
-            n / d
-        }
+        self.mag.as_f64()
+    }
+
+    /// Exact rational magnitude when still exact.
+    pub fn exact_ratio(&self) -> Option<Ratio<i128>> {
+        self.mag.exact_ratio()
     }
 
     /// Convert to another unit via registry anchor ratios (M4).
@@ -233,11 +241,6 @@ impl Quantity {
     /// Format for display (M7).
     pub fn display(&self, registry: &crate::Registry, opts: &crate::FmtOptions) -> String {
         crate::fmt::format_quantity(self, registry, opts)
-    }
-
-    /// Effective rational magnitude for exact arithmetic.
-    pub(crate) fn effective_magnitude(&self) -> Ratio<i128> {
-        self.magnitude
     }
 }
 

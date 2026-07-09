@@ -163,7 +163,8 @@ impl Registry {
                 continue;
             }
             if unit.anchor_ratio == Ratio::one() {
-                lines.push(format!("define {names}"));
+                let anchor_name = self.anchor_unit_name_for_dim(&unit.dimension);
+                lines.push(format!("define {names} = 1 {anchor_name}"));
             } else {
                 let anchor_name = self.anchor_unit_name_for_dim(&unit.dimension);
                 lines.push(format!(
@@ -589,8 +590,15 @@ impl RegistryBuilder {
 }
 
 fn resolve_anchor_ratio(qty: &Quantity, builder: &RegistryBuilder) -> Result<Ratio<i128>, Diag> {
+    let mag = qty.mag.exact_ratio().ok_or_else(|| {
+        Diag::new(Diagnostic::error(
+            ErrorCode::DefSymbolic,
+            "anchor resolution requires exact magnitudes",
+            Span::empty(0),
+        ))
+    })?;
     match &qty.unit {
-        UnitExpr::Dimensionless => Ok(qty.magnitude),
+        UnitExpr::Dimensionless => Ok(mag),
         UnitExpr::Named(name) => {
             let record = builder.units.get(name).ok_or_else(|| {
                 Diag::new(Diagnostic::error(
@@ -599,29 +607,35 @@ fn resolve_anchor_ratio(qty: &Quantity, builder: &RegistryBuilder) -> Result<Rat
                     Span::empty(0),
                 ))
             })?;
-            Ok(qty.magnitude * record.anchor_ratio)
+            Ok(mag * record.anchor_ratio)
         }
         UnitExpr::Product(parts) => {
-            let mut ratio = qty.magnitude;
+            let mut ratio = mag;
             for part in parts {
-                let part_ratio =
-                    resolve_anchor_ratio(&Quantity::new(Ratio::one(), part.clone(), qty.dim.clone()), builder)?;
+                let part_ratio = resolve_anchor_ratio(
+                    &Quantity::from_exact(Ratio::one(), part.clone(), qty.dim.clone()),
+                    builder,
+                )?;
                 ratio *= part_ratio;
             }
             Ok(ratio)
         }
         UnitExpr::Quotient(num, den) => {
-            let num_r =
-                resolve_anchor_ratio(&Quantity::new(qty.magnitude, *num.clone(), qty.dim.clone()), builder)?;
+            let num_r = resolve_anchor_ratio(
+                &Quantity::from_exact(mag, *num.clone(), qty.dim.clone()),
+                builder,
+            )?;
             let den_r = resolve_anchor_ratio(
-                &Quantity::new(Ratio::one(), *den.clone(), qty.dim.clone()),
+                &Quantity::from_exact(Ratio::one(), *den.clone(), qty.dim.clone()),
                 builder,
             )?;
             Ok(num_r / den_r)
         }
         UnitExpr::Pow { base, exp } => {
-            let base_r =
-                resolve_anchor_ratio(&Quantity::new(qty.magnitude, *base.clone(), qty.dim.clone()), builder)?;
+            let base_r = resolve_anchor_ratio(
+                &Quantity::from_exact(mag, *base.clone(), qty.dim.clone()),
+                builder,
+            )?;
             let e = unit_exponent_to_i32(exp)?;
             Ok(if e >= 0 {
                 base_r.pow(e)

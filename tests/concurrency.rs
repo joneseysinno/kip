@@ -32,7 +32,7 @@ fn eval_is_deterministic_across_threads() {
                 let resolver = EmptyResolver;
                 let v = eval(expr.as_ref(), &reg, &resolver).expect("eval");
                 let q = v.quantity().expect("known");
-                (q.magnitude, q.unit.as_str().to_string())
+                (q.exact_ratio().unwrap(), q.unit.as_str().to_string())
             })
         })
         .collect();

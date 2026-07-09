@@ -85,6 +85,8 @@ pub enum ErrorCode {
     BareTick,
     /// Zero denominator in a fraction literal (grammar §8).
     DivZeroLiteral,
+    /// Mixed affine temperature addition (grammar §9).
+    AffineMixed,
 }
 
 impl ErrorCode {
@@ -112,6 +114,7 @@ impl ErrorCode {
             Self::TickSpace => "E-TICK-SPACE",
             Self::BareTick => "E-BARE-TICK",
             Self::DivZeroLiteral => "E-DIV-ZERO-LITERAL",
+            Self::AffineMixed => "E-AFFINE-MIXED",
         }
     }
 }
@@ -135,6 +138,8 @@ pub enum LintCode {
     SpacedCaret,
     /// Name is both a registered unit and a resolver-known symbol (parser).
     UnitShadow,
+    /// Same-unit affine temperature addition interpreted as delta (grammar §9).
+    AffineDelta,
 }
 
 impl LintCode {
@@ -149,6 +154,7 @@ impl LintCode {
             Self::CommaGroup => "L-COMMA-GROUP",
             Self::SpacedCaret => "L-SPACED-CARET",
             Self::UnitShadow => "L-UNIT-SHADOW",
+            Self::AffineDelta => "L-AFFINE-DELTA",
         }
     }
 }

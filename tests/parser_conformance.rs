@@ -1,7 +1,7 @@
 //! Parser conformance tests (grammar-spec §8 — pure syntax).
 
 use kip::{
-    parse, parse_checked, BinaryOp, Callee, Dimension, ErrorCode, ExprKind, LintCode, MapResolver,
+    parse, parse_checked, BinaryOp, Callee, Dimension, ErrorCode, ExprKind, LintCode, Mag, MapResolver,
     Quantity, RegistryBuilder, UnitExpr, Value,
 };
 use num_rational::Ratio;
@@ -211,7 +211,7 @@ fn unit_shadow_lint_when_resolver_knows_symbol() {
     resolver.insert(
         "s",
         Value::Known(Quantity::new(
-            Ratio::one(),
+            Mag::exact(Ratio::one()),
             UnitExpr::one(),
             Dimension::dimensionless(),
         )),

@@ -29,7 +29,7 @@ proptest! {
         let q = kip::Quantity::from_int(i128::from(n), "ft", kip::Dimension::single(kip::BaseDim::Length, Ratio::one()));
         let inches = q.convert_to(&UnitExpr::named("in"), &reg).expect("to in");
         let back = inches.convert_to(&UnitExpr::named("ft"), &reg).expect("to ft");
-        prop_assert_eq!(back.magnitude, q.magnitude);
+        prop_assert_eq!(back.exact_ratio(), q.exact_ratio());
         prop_assert_eq!(back.unit.as_str(), "ft");
     }
 
@@ -41,6 +41,6 @@ proptest! {
         });
         let lbf = q.convert_to(&UnitExpr::named("lbf"), &reg).expect("kip->lbf");
         let kip = lbf.convert_to(&UnitExpr::named("kip"), &reg).expect("lbf->kip");
-        prop_assert_eq!(kip.magnitude, q.magnitude);
+        prop_assert_eq!(kip.exact_ratio(), q.exact_ratio());
     }
 }

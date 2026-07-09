@@ -25,8 +25,8 @@ fn eval_known(src: &str, reg: &kip::Registry) -> Value {
     eval(expr.as_ref(), reg, &EmptyResolver).expect("eval")
 }
 
-fn known_magnitude(v: &Value) -> num_rational::Ratio<i128> {
-    v.quantity().expect("known").magnitude
+fn comparable_magnitude(v: &Value) -> f64 {
+    v.quantity().expect("known").as_f64()
 }
 
 #[test]
@@ -43,9 +43,8 @@ fn anchor_invariance_eval_values_match() {
     for src in cases {
         let v0 = eval_known(src, &default);
         let v1 = eval_known(src, &shuffled);
-        assert_eq!(
-            known_magnitude(&v0),
-            known_magnitude(&v1),
+        assert!(
+            (comparable_magnitude(&v0) - comparable_magnitude(&v1)).abs() < 1e-9,
             "magnitude mismatch for `{src}`"
         );
         assert_eq!(

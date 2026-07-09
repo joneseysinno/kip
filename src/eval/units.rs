@@ -1,10 +1,14 @@
 //! Unit resolution, conversion, and leftmost-wins unification.
 
-use num_rational::Ratio;
-use num_traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, FromPrimitive, One, Zero};
+use std::cmp::Ordering;
 
-use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, Span};
+use num_rational::Ratio;
+use num_traits::{FromPrimitive, One, Zero};
+
+use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Span};
 use crate::dim::Dimension;
+use crate::eval::lint_sink::LintSink;
+use crate::eval::mag::{Mag, MagOpResult, TaintEvent};
 use crate::eval::value::Quantity;
 use crate::quantity::{UnitExpr, UnitExponent};
 use crate::registry::Registry;
@@ -36,7 +40,13 @@ pub fn dimension_of_unit(unit: &UnitExpr, registry: &Registry) -> Result<Dimensi
 /// Exact anchor magnitude for a quantity written in user units.
 pub fn magnitude_in_anchor_units(q: &Quantity, registry: &Registry) -> Result<Ratio<i128>, Diag> {
     let factor = unit_to_anchor_factor(&q.unit, registry)?;
-    Ok(q.effective_magnitude() * factor)
+    match q.mag {
+        Mag::Exact(r) => Ok(r * factor),
+        Mag::Float(f) => {
+            let anchor_f = f * ratio_to_f64(factor);
+            Ok(f64_to_ratio_approx(anchor_f))
+        }
+    }
 }
 
 /// Convert a quantity to another unit expression (same dimension).
@@ -59,44 +69,48 @@ pub fn convert_quantity(
         return convert_affine(q, target, registry);
     }
 
-    if q.float_mag.is_some() {
-        let anchor_f = q.as_f64() * ratio_to_f64(unit_to_anchor_factor(&q.unit, registry)?);
-        let target_f = ratio_to_f64(unit_to_anchor_factor(target, registry)?);
-        if target_f == 0.0 {
-            return Err(Diag::new(Diagnostic::error(
-                ErrorCode::Eval,
-                "zero conversion factor",
-                Span::empty(0),
-            )));
+    match q.mag {
+        Mag::Float(_) => {
+            let anchor_f = q.as_f64() * ratio_to_f64(unit_to_anchor_factor(&q.unit, registry)?);
+            let target_f = ratio_to_f64(unit_to_anchor_factor(target, registry)?);
+            if target_f == 0.0 {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::Eval,
+                    "zero conversion factor",
+                    Span::empty(0),
+                )));
+            }
+            let f = anchor_f / target_f;
+            Ok(Quantity {
+                mag: Mag::float(f).map_err(|_| non_finite(Span::empty(0)))?,
+                unit: target.clone(),
+                dim: target_dim,
+                provenance: q.provenance.clone(),
+            })
         }
-        return Ok(Quantity {
-            magnitude: Ratio::from_integer(1),
-            float_mag: Some(anchor_f / target_f),
-            unit: target.clone(),
-            dim: target_dim,
-            provenance: q.provenance.clone(),
-        });
+        Mag::Exact(_) => {
+            let anchor = magnitude_in_anchor_units(q, registry)?;
+            let target_factor = unit_to_anchor_factor(target, registry)?;
+            if target_factor.is_zero() {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::Eval,
+                    "zero conversion factor",
+                    Span::empty(0),
+                )));
+            }
+            let mag = anchor / target_factor;
+            Ok(Quantity::from_exact(mag, target.clone(), target_dim))
+        }
     }
-
-    let anchor = magnitude_in_anchor_units(q, registry)?;
-    let target_factor = unit_to_anchor_factor(target, registry)?;
-    if target_factor.is_zero() {
-        return Err(Diag::new(Diagnostic::error(
-            ErrorCode::Eval,
-            "zero conversion factor",
-            Span::empty(0),
-        )));
-    }
-    let mag = anchor / target_factor;
-    Ok(Quantity::new(mag, target.clone(), target_dim))
 }
 
-/// Leftmost-wins addition/subtraction unification.
+/// Leftmost-wins addition.
 pub fn unify_add(
     left: &Quantity,
     right: &Quantity,
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Quantity, Diag> {
     if left.dim != right.dim {
         return Err(dim_mismatch(
@@ -109,32 +123,35 @@ pub fn unify_add(
 
     if is_affine_unit_expr(&left.unit, registry) || is_affine_unit_expr(&right.unit, registry) {
         if affine_same_display_unit(&left.unit, &right.unit) {
+            lints.push(Diag::new(Diagnostic::lint(
+                LintCode::AffineDelta,
+                format!(
+                    "interpreted as {} + Δ{}; absolute-temperature addition is rarely meaningful",
+                    left.unit.as_str(),
+                    right.unit.as_str()
+                ),
+                span,
+            )));
             let rhs = convert_quantity(right, &left.unit, registry)?;
-            let mag = rational_add(left.effective_magnitude(), rhs.effective_magnitude())?;
+            let mag = finalize_mag(left.mag.add(rhs.mag), lints, span, "addition")?;
             return Ok(Quantity {
-                magnitude: mag,
-                float_mag: None,
+                mag,
                 unit: left.unit.clone(),
                 dim: left.dim.clone(),
                 provenance: left.provenance.clone(),
             });
         }
-        use crate::eval::affine::{absolute_from_rankine, to_rankine};
-        let l = to_rankine(left, registry)?;
-        let r = to_rankine(right, registry)?;
-        let sum = Quantity::new(
-            l.effective_magnitude() + r.effective_magnitude(),
-            l.unit.clone(),
-            l.dim.clone(),
-        );
-        return absolute_from_rankine(&sum, &left.unit, registry);
+        return Err(Diag::new(Diagnostic::error(
+            ErrorCode::AffineMixed,
+            "cannot add different affine temperature units; convert explicitly",
+            span,
+        )));
     }
 
     let rhs = convert_quantity(right, &left.unit, registry)?;
-    let mag = rational_add(left.effective_magnitude(), rhs.effective_magnitude())?;
+    let mag = finalize_mag(left.mag.add(rhs.mag), lints, span, "addition")?;
     Ok(Quantity {
-        magnitude: mag,
-        float_mag: None,
+        mag,
         unit: left.unit.clone(),
         dim: left.dim.clone(),
         provenance: left.provenance.clone(),
@@ -147,6 +164,7 @@ pub fn unify_sub(
     right: &Quantity,
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Quantity, Diag> {
     if left.dim != right.dim {
         return Err(dim_mismatch(
@@ -160,10 +178,9 @@ pub fn unify_sub(
     if is_affine_unit_expr(&left.unit, registry) || is_affine_unit_expr(&right.unit, registry) {
         if affine_same_display_unit(&left.unit, &right.unit) {
             let rhs = convert_quantity(right, &left.unit, registry)?;
-            let mag = rational_sub(left.effective_magnitude(), rhs.effective_magnitude())?;
+            let mag = finalize_mag(left.mag.sub(rhs.mag), lints, span, "subtraction")?;
             return Ok(Quantity {
-                magnitude: mag,
-                float_mag: None,
+                mag,
                 unit: left.unit.clone(),
                 dim: left.dim.clone(),
                 provenance: left.provenance.clone(),
@@ -172,19 +189,20 @@ pub fn unify_sub(
         use crate::eval::affine::{absolute_from_rankine, to_rankine};
         let l = to_rankine(left, registry)?;
         let r = to_rankine(right, registry)?;
-        let diff = Quantity::new(
-            l.effective_magnitude() - r.effective_magnitude(),
-            l.unit.clone(),
-            l.dim.clone(),
-        );
+        let mag = finalize_mag(l.mag.sub(r.mag), lints, span, "subtraction")?;
+        let diff = Quantity {
+            mag,
+            unit: l.unit.clone(),
+            dim: l.dim.clone(),
+            provenance: left.provenance.clone(),
+        };
         return absolute_from_rankine(&diff, &left.unit, registry);
     }
 
     let rhs = convert_quantity(right, &left.unit, registry)?;
-    let mag = rational_sub(left.effective_magnitude(), rhs.effective_magnitude())?;
+    let mag = finalize_mag(left.mag.sub(rhs.mag), lints, span, "subtraction")?;
     Ok(Quantity {
-        magnitude: mag,
-        float_mag: None,
+        mag,
         unit: left.unit.clone(),
         dim: left.dim.clone(),
         provenance: left.provenance.clone(),
@@ -192,22 +210,17 @@ pub fn unify_sub(
 }
 
 /// Multiply two quantities (dimension composition).
-pub fn combine_mul(left: &Quantity, right: &Quantity, _span: Span) -> Result<Quantity, Diag> {
+pub fn combine_mul(
+    left: &Quantity,
+    right: &Quantity,
+    span: Span,
+    lints: &mut LintSink,
+) -> Result<Quantity, Diag> {
     let unit = compose_unit_expr(&left.unit, &right.unit, true);
     let dim = left.dim.mul(&right.dim);
-    if left.float_mag.is_some() || right.float_mag.is_some() {
-        return Ok(Quantity {
-            magnitude: Ratio::from_integer(1),
-            float_mag: Some(left.as_f64() * right.as_f64()),
-            unit,
-            dim,
-            provenance: left.provenance.clone().or(right.provenance.clone()),
-        });
-    }
-    let mag = rational_mul(left.effective_magnitude(), right.effective_magnitude())?;
+    let mag = finalize_mag(left.mag.mul(right.mag), lints, span, "multiplication")?;
     Ok(Quantity {
-        magnitude: mag,
-        float_mag: None,
+        mag,
         unit,
         dim,
         provenance: left.provenance.clone().or(right.provenance.clone()),
@@ -215,8 +228,13 @@ pub fn combine_mul(left: &Quantity, right: &Quantity, _span: Span) -> Result<Qua
 }
 
 /// Divide two quantities.
-pub fn combine_div(left: &Quantity, right: &Quantity, span: Span) -> Result<Quantity, Diag> {
-    if right.as_f64() == 0.0 {
+pub fn combine_div(
+    left: &Quantity,
+    right: &Quantity,
+    span: Span,
+    lints: &mut LintSink,
+) -> Result<Quantity, Diag> {
+    if right.mag.is_zero() {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
             "division by zero",
@@ -225,19 +243,13 @@ pub fn combine_div(left: &Quantity, right: &Quantity, span: Span) -> Result<Quan
     }
     let unit = compose_unit_expr(&left.unit, &right.unit, false);
     let dim = left.dim.div(&right.dim);
-    if left.float_mag.is_some() || right.float_mag.is_some() {
-        return Ok(Quantity {
-            magnitude: Ratio::from_integer(1),
-            float_mag: Some(left.as_f64() / right.as_f64()),
-            unit,
-            dim,
-            provenance: left.provenance.clone().or(right.provenance.clone()),
-        });
-    }
-    let mag = rational_div(left.effective_magnitude(), right.effective_magnitude())?;
+    let result = left
+        .mag
+        .div(right.mag)
+        .map_err(|_| Diag::new(Diagnostic::error(ErrorCode::Eval, "division by zero", span)))?;
+    let mag = finalize_mag(result, lints, span, "division")?;
     Ok(Quantity {
-        magnitude: mag,
-        float_mag: None,
+        mag,
         unit,
         dim,
         provenance: left.provenance.clone().or(right.provenance.clone()),
@@ -249,6 +261,7 @@ pub fn combine_pow(
     left: &Quantity,
     exp: &Quantity,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Quantity, Diag> {
     if !exp.dim.is_dimensionless() {
         return Err(Diag::new(Diagnostic::error(
@@ -257,9 +270,9 @@ pub fn combine_pow(
             span,
         )));
     }
-    let e = ratio_to_i32(exp.effective_magnitude(), span)?;
+    let e = ratio_to_i32_from_mag(exp.mag, span)?;
     let dim = left.dim.pow(Ratio::from_integer(e));
-    let mag = left.effective_magnitude().pow(e);
+    let mag = finalize_mag(left.mag.pow_int(e), lints, span, "exponentiation")?;
     let unit = if e == 1 {
         left.unit.clone()
     } else if e == 0 {
@@ -270,13 +283,76 @@ pub fn combine_pow(
             exp: UnitExponent::Int(e),
         }
     };
-    Ok(Quantity::new(mag, unit, dim))
+    Ok(Quantity {
+        mag,
+        unit,
+        dim,
+        provenance: left.provenance.clone(),
+    })
 }
 
 /// Halve dimension exponents (for `sqrt`).
 pub fn halve_dimension(dim: &Dimension) -> Result<Dimension, Diag> {
     let half = Ratio::new(1, 2);
     Ok(dim.pow(half))
+}
+
+/// Compare magnitudes for range checks.
+pub fn mag_cmp(a: Mag, b: Mag) -> Option<Ordering> {
+    a.partial_cmp(b)
+}
+
+fn finalize_mag(
+    result: MagOpResult,
+    lints: &mut LintSink,
+    span: Span,
+    op_name: &str,
+) -> Result<Mag, Diag> {
+    if let Some(event) = result.event {
+        let msg = match event {
+            TaintEvent::ExactnessLost => format!("{op_name} produced an inexact result"),
+            TaintEvent::RationalOverflow => {
+                format!("{op_name} overflowed i128 rational; using float")
+            }
+        };
+        lints.record_mag_event(event, span, msg);
+    }
+    match result.mag {
+        Mag::Float(f) => Mag::float(f).map_err(|_| non_finite(span)),
+        Mag::Exact(r) => Ok(Mag::Exact(r)),
+    }
+}
+
+fn ratio_to_i32_from_mag(mag: Mag, span: Span) -> Result<i32, Diag> {
+    let r = mag.exact_ratio().ok_or_else(|| {
+        Diag::new(Diagnostic::error(
+            ErrorCode::Eval,
+            "non-integer exponent",
+            span,
+        ))
+    })?;
+    if r.denom() != &1i128 {
+        return Err(Diag::new(Diagnostic::error(
+            ErrorCode::Eval,
+            "non-integer exponent",
+            span,
+        )));
+    }
+    (*r.numer()).try_into().map_err(|_| {
+        Diag::new(Diagnostic::error(
+            ErrorCode::Eval,
+            "exponent out of range",
+            span,
+        ))
+    })
+}
+
+fn non_finite(span: Span) -> Diag {
+    Diag::new(Diagnostic::error(
+        ErrorCode::Eval,
+        "non-finite numeric result",
+        span,
+    ))
 }
 
 fn unit_to_anchor_factor(unit: &UnitExpr, registry: &Registry) -> Result<Ratio<i128>, Diag> {
@@ -381,10 +457,7 @@ fn is_affine_unit_expr(unit: &UnitExpr, registry: &Registry) -> bool {
 }
 
 fn affine_same_display_unit(left: &UnitExpr, right: &UnitExpr) -> bool {
-    match (left, right) {
-        (UnitExpr::Named(a), UnitExpr::Named(b)) => a == b,
-        _ => false,
-    }
+    matches!((left, right), (UnitExpr::Named(a), UnitExpr::Named(b)) if a == b)
 }
 
 fn convert_affine(
@@ -393,25 +466,8 @@ fn convert_affine(
     registry: &Registry,
 ) -> Result<Quantity, Diag> {
     use crate::eval::affine::{absolute_from_rankine, to_rankine};
-
     let rankine = to_rankine(q, registry)?;
     absolute_from_rankine(&rankine, target, registry)
-}
-
-fn rational_add(a: Ratio<i128>, b: Ratio<i128>) -> Result<Ratio<i128>, Diag> {
-    a.checked_add(&b).ok_or_else(overflow_diag)
-}
-
-fn rational_sub(a: Ratio<i128>, b: Ratio<i128>) -> Result<Ratio<i128>, Diag> {
-    a.checked_sub(&b).ok_or_else(overflow_diag)
-}
-
-fn rational_mul(a: Ratio<i128>, b: Ratio<i128>) -> Result<Ratio<i128>, Diag> {
-    a.checked_mul(&b).ok_or_else(overflow_diag)
-}
-
-fn rational_div(a: Ratio<i128>, b: Ratio<i128>) -> Result<Ratio<i128>, Diag> {
-    a.checked_div(&b).ok_or_else(overflow_diag)
 }
 
 fn f64_to_ratio_approx(f: f64) -> Ratio<i128> {
@@ -423,31 +479,6 @@ fn ratio_to_f64(r: Ratio<i128>) -> f64 {
     let n: f64 = num_traits::ToPrimitive::to_f64(r.numer()).unwrap_or(0.0);
     let d: f64 = num_traits::ToPrimitive::to_f64(r.denom()).unwrap_or(1.0);
     n / d
-}
-
-fn ratio_to_i32(r: Ratio<i128>, span: Span) -> Result<i32, Diag> {
-    if r.denom() != &1i128 {
-        return Err(Diag::new(Diagnostic::error(
-            ErrorCode::Eval,
-            "non-integer exponent",
-            span,
-        )));
-    }
-    (*r.numer()).try_into().map_err(|_| {
-        Diag::new(Diagnostic::error(
-            ErrorCode::Eval,
-            "exponent out of range",
-            span,
-        ))
-    })
-}
-
-fn overflow_diag() -> Diag {
-    Diag::new(Diagnostic::error(
-        ErrorCode::Eval,
-        "rational overflow",
-        Span::empty(0),
-    ))
 }
 
 fn unknown_unit(name: &str, span: Span) -> Diag {
@@ -479,7 +510,7 @@ mod tests {
         let reg = RegistryBuilder::from_seed().freeze();
         let q = Quantity::from_int(1, "ft", Dimension::single(BaseDim::Length, Ratio::one()));
         let converted = convert_quantity(&q, &UnitExpr::named("in"), &reg).unwrap();
-        assert_eq!(converted.magnitude, Ratio::from_i32(12).unwrap());
+        assert_eq!(converted.exact_ratio(), Some(Ratio::from_i32(12).unwrap()));
         assert_eq!(converted.unit.as_str(), "in");
     }
 }

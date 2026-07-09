@@ -334,11 +334,16 @@ Every entry states input → expected result. These are the day-one regression t
 | `E-DEF-CYCLE` | circular unit definitions |
 | `E-DEF-SYMBOLIC` | unit definition references a free symbol |
 | `E-DIV-ZERO-LITERAL` | zero denominator in a fraction literal |
+| `E-AFFINE-MIXED` | addition of different affine temperature units without explicit conversion |
 | `L-FTIN-SPACED` | spaced hyphen interpreted as feet-inch compound |
 | `L-INCH-GE-12` | inch part ≥ 12 inside a compound |
 | `L-UNIT-SHADOW` | name is both a registered unit and a resolver-known symbol |
 | `L-SPACED-CARET` | ws-separated `^` changed binding relative to the tight form |
 | `L-COMMA-GROUP` | comma used as an apparent digit-group separator |
+| `L-EXACTNESS-LOST` | first transition from exact rational to float during evaluation |
+| `L-RATIONAL-OVERFLOW` | `Ratio<i128>` overflow forced float fallback |
+| `L-RANGE` | pack argument outside declared validity range (lint severity) |
+| `L-AFFINE-DELTA` | same-unit affine temperature addition interpreted as delta |
 
 Removed from Draft 1: `E-DUP-BINDING` (sheet concern — see Appendix A, which recommends the equivalent policy to host applications).
 

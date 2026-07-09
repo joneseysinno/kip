@@ -52,17 +52,16 @@ pub fn parse_defs(builder: &mut RegistryBuilder, src: &str) -> Result<(), Diag> 
     let mut stmts = Vec::new();
     let mut byte_offset = 0usize;
 
-    for line in src.lines() {
+    for line in src.split_inclusive('\n') {
         let line_start = byte_offset;
-        let trimmed = line.split('#').next().unwrap_or(line).trim();
-        byte_offset += line.len() + 1;
-
-        if trimmed.is_empty() {
-            continue;
+        let line_body = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = line_body.split('#').next().unwrap_or(line_body).trim();
+        if !trimmed.is_empty() {
+            let leading = line_body.len() - line_body.trim_start().len();
+            let span = Span::new(line_start + leading, line_start + leading + trimmed.len());
+            stmts.push(parse_line(trimmed, span)?);
         }
-
-        let span = Span::new(line_start, line_start + trimmed.len());
-        stmts.push(parse_line(trimmed, span)?);
+        byte_offset += line.len();
     }
 
   apply_stmts(builder, stmts)

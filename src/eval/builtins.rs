@@ -1,10 +1,12 @@
 //! Built-in functions with dimension semantics (M4).
 
 use num_rational::Ratio;
-use num_traits::Signed;
+use num_traits::ToPrimitive;
 
 use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::dim::{BaseDim, Dimension};
+use crate::eval::lint_sink::LintSink;
+use crate::eval::mag::{Mag, TaintEvent};
 use crate::eval::units::{convert_quantity, halve_dimension};
 use crate::eval::value::{Quantity, SymUnaryOp, Value};
 use crate::quantity::{UnitExpr, UnitExponent};
@@ -16,12 +18,13 @@ pub fn eval_builtin(
     args: &[Value],
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     match name {
-        "sqrt" => eval_sqrt(args, span),
+        "sqrt" => eval_sqrt(args, span, lints),
         "abs" => eval_unary_quantity(args, |q| {
             Ok(Quantity::new(
-                q.magnitude.abs(),
+                q.mag.abs(),
                 q.unit.clone(),
                 q.dim.clone(),
             ))
@@ -31,7 +34,7 @@ pub fn eval_builtin(
         "sin" | "cos" | "tan" => eval_trig(name, args, registry, span),
         "asin" | "acos" | "atan" => eval_inverse_trig(name, args, registry, span),
         "atan2" => eval_atan2(args, registry, span),
-        "ln" | "log10" | "exp" => eval_transcendental(name, args, span),
+        "ln" | "log10" | "exp" => eval_transcendental(name, args, span, lints),
         _ => Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
             format!("unknown function `{name}`"),
@@ -40,7 +43,7 @@ pub fn eval_builtin(
     }
 }
 
-fn eval_sqrt(args: &[Value], span: Span) -> Result<Value, Diag> {
+fn eval_sqrt(args: &[Value], span: Span, lints: &mut LintSink) -> Result<Value, Diag> {
     if args.len() != 1 {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
@@ -50,7 +53,7 @@ fn eval_sqrt(args: &[Value], span: Span) -> Result<Value, Diag> {
     }
     match &args[0] {
         Value::Known(q) => {
-            if q.effective_magnitude().is_negative() {
+            if q.mag.is_negative() {
                 return Err(Diag::new(Diagnostic::error(
                     ErrorCode::Eval,
                     "square root of negative value",
@@ -58,23 +61,53 @@ fn eval_sqrt(args: &[Value], span: Span) -> Result<Value, Diag> {
                 )));
             }
             let dim = halve_dimension(&q.dim)?;
-            let mag_f = q.as_f64().sqrt();
             let unit = UnitExpr::Pow {
                 base: Box::new(q.unit.clone()),
                 exp: UnitExponent::Ratio { num: 1, den: 2 },
             };
-            Ok(Value::Known(Quantity {
-                magnitude: Ratio::from_integer(1),
-                float_mag: Some(mag_f),
-                unit,
-                dim,
-                provenance: None,
-            }))
+            let mag = match q.mag {
+                Mag::Exact(r) => {
+                    if let Some(root) = rational_sqrt(r) {
+                        Mag::Exact(root)
+                    } else {
+                        let f = r.to_f64().unwrap_or(0.0).sqrt();
+                        lints.record_mag_event(
+                            TaintEvent::ExactnessLost,
+                            span,
+                            "square root produced an inexact result",
+                        );
+                        Mag::float(f).map_err(|_| non_finite(span))?
+                    }
+                }
+                Mag::Float(f) => Mag::float(f.sqrt()).map_err(|_| non_finite(span))?,
+            };
+            Ok(Value::Known(Quantity::new(mag, unit, dim)))
         }
         Value::Symbolic(s) => Ok(crate::eval::partial::symbolic_unary(
             SymUnaryOp::Sqrt,
             s,
         )),
+    }
+}
+
+fn rational_sqrt(r: Ratio<i128>) -> Option<Ratio<i128>> {
+    let num = integer_sqrt(*r.numer())?;
+    let den = integer_sqrt(*r.denom())?;
+    Some(Ratio::new(num, den))
+}
+
+fn integer_sqrt(n: i128) -> Option<i128> {
+    if n < 0 {
+        return None;
+    }
+    if n == 0 {
+        return Some(0);
+    }
+    let root = (n as f64).sqrt().round() as i128;
+    if root * root == n {
+        Some(root)
+    } else {
+        None
     }
 }
 
@@ -111,7 +144,7 @@ fn eval_rounding(name: &str, args: &[Value], span: Span) -> Result<Value, Diag> 
         "round" => f.round(),
         _ => unreachable!(),
     };
-    Ok(Value::Known(float_quantity(q, rounded)))
+    Ok(Value::Known(float_quantity(q, rounded)?))
 }
 
 fn eval_trig(
@@ -130,13 +163,7 @@ fn eval_trig(
         "tan" => f.tan(),
         _ => unreachable!(),
     };
-    Ok(Value::Known(Quantity {
-        magnitude: Ratio::from_integer(1),
-        float_mag: Some(out),
-        unit: UnitExpr::one(),
-        dim: Dimension::dimensionless(),
-        provenance: None,
-    }))
+    Ok(Value::Known(dimensionless_float(out)?))
 }
 
 fn eval_inverse_trig(
@@ -154,13 +181,11 @@ fn eval_inverse_trig(
         "atan" => x.atan(),
         _ => unreachable!(),
     };
-    let mut out = Quantity::from_int(
-        0,
-        "deg",
+    Ok(Value::Known(Quantity::from_float(
+        rad.to_degrees(),
+        UnitExpr::named("deg"),
         Dimension::single(BaseDim::Angle, Ratio::from_integer(1)),
-    );
-    out.float_mag = Some(rad.to_degrees());
-    Ok(Value::Known(out))
+    ).map_err(|_| non_finite(span))?))
 }
 
 fn eval_atan2(args: &[Value], _registry: &Registry, span: Span) -> Result<Value, Diag> {
@@ -176,16 +201,19 @@ fn eval_atan2(args: &[Value], _registry: &Registry, span: Span) -> Result<Value,
     require_dimensionless(&y.dim, span)?;
     require_dimensionless(&x.dim, span)?;
     let rad = y.as_f64().atan2(x.as_f64());
-    let mut q = Quantity::from_int(
-        0,
-        "deg",
+    Ok(Value::Known(Quantity::from_float(
+        rad.to_degrees(),
+        UnitExpr::named("deg"),
         Dimension::single(BaseDim::Angle, Ratio::from_integer(1)),
-    );
-    q.float_mag = Some(rad.to_degrees());
-    Ok(Value::Known(q))
+    ).map_err(|_| non_finite(span))?))
 }
 
-fn eval_transcendental(name: &str, args: &[Value], span: Span) -> Result<Value, Diag> {
+fn eval_transcendental(
+    name: &str,
+    args: &[Value],
+    span: Span,
+    lints: &mut LintSink,
+) -> Result<Value, Diag> {
     let q = require_quantity(args, 1, span)?;
     require_dimensionless(&q.dim, span)?;
     let x = q.as_f64();
@@ -195,13 +223,14 @@ fn eval_transcendental(name: &str, args: &[Value], span: Span) -> Result<Value, 
         "exp" => x.exp(),
         _ => unreachable!(),
     };
-    Ok(Value::Known(Quantity {
-        magnitude: Ratio::from_integer(1),
-        float_mag: Some(out),
-        unit: UnitExpr::one(),
-        dim: Dimension::dimensionless(),
-        provenance: None,
-    }))
+    if q.is_exact() {
+        lints.record_mag_event(
+            TaintEvent::ExactnessLost,
+            span,
+            format!("`{name}` produced an inexact result"),
+        );
+    }
+    Ok(Value::Known(dimensionless_float(out)?))
 }
 
 fn eval_unary_quantity(
@@ -264,12 +293,23 @@ fn to_radians(q: &Quantity, registry: &Registry) -> Result<Quantity, Diag> {
     q.convert_to(&UnitExpr::named("rad"), registry)
 }
 
-fn float_quantity(base: &Quantity, f: f64) -> Quantity {
-    Quantity {
-        magnitude: base.magnitude,
-        float_mag: Some(f),
-        unit: base.unit.clone(),
-        dim: base.dim.clone(),
-        provenance: base.provenance.clone(),
-    }
+fn float_quantity(base: &Quantity, f: f64) -> Result<Quantity, Diag> {
+    Ok(Quantity::new(
+        Mag::float(f).map_err(|_| non_finite(Span::empty(0)))?,
+        base.unit.clone(),
+        base.dim.clone(),
+    ))
+}
+
+fn dimensionless_float(f: f64) -> Result<Quantity, Diag> {
+    Quantity::from_float(f, UnitExpr::one(), Dimension::dimensionless())
+        .map_err(|_| non_finite(Span::empty(0)))
+}
+
+fn non_finite(span: Span) -> Diag {
+    Diag::new(Diagnostic::error(
+        ErrorCode::Eval,
+        "non-finite numeric result",
+        span,
+    ))
 }
