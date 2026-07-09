@@ -1,0 +1,35 @@
+[package]
+name = "kip"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Pure thread-safe engineering expression evaluator for US imperial units"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["engineering", "units", "imperial", "expression", "evaluator"]
+categories = ["science", "mathematics"]
+repository = "https://github.com/kip-rs/kip"
+
+[features]
+default = ["packs", "parallel"]
+packs = ["dep:serde", "dep:toml"]
+parallel = ["dep:rayon"]
+si-display = []
+
+[dependencies]
+num-rational = "0.4"
+num-traits = "0.2"
+smallvec = "1"
+unicode-ident = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
+rayon = { version = "1", optional = true }
+
+[dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+mod_module_files = "warn"
