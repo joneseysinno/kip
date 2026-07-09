@@ -1,9 +1,11 @@
 //! Evaluation results: known quantities and symbolic residuals.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use num_rational::Ratio;
 
+use crate::diag::Span;
 use crate::dim::Dimension;
 use crate::quantity::UnitExpr;
 use crate::{Diag, Resolver};
@@ -12,11 +14,39 @@ use crate::{Diag, Resolver};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Symbol(pub String);
 
+/// Provenance for a quantity produced by a code equation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquationProvenance {
+    /// Pack identifier from TOML.
+    pub pack_id: String,
+    /// Human-readable pack title.
+    pub title: String,
+    /// Code edition string.
+    pub edition: String,
+    /// License field from pack metadata.
+    pub license: String,
+    /// Equation namespace (`ACI`).
+    pub namespace: String,
+    /// Equation id within namespace (`fr`).
+    pub equation_id: String,
+    /// Section citation string.
+    pub cite: String,
+}
+
+/// Recorded dimension constraint with provenance sites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolConstraint {
+    /// Required dimension.
+    pub dim: Dimension,
+    /// Spans that contributed this constraint.
+    pub sites: Vec<Span>,
+}
+
 /// Dimension constraints accumulated over free symbols.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConstraintSet {
     /// Required dimension per symbol.
-    pub symbol_dims: BTreeMap<Symbol, Dimension>,
+    pub symbol_dims: BTreeMap<Symbol, SymbolConstraint>,
 }
 
 impl ConstraintSet {
@@ -25,35 +55,105 @@ impl ConstraintSet {
         Self::default()
     }
 
-    /// Pin or unify a symbol's dimension.
-    pub fn pin(&mut self, sym: Symbol, dim: Dimension) -> Result<(), crate::Diag> {
-        use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, Span};
+    /// Pin or unify a symbol's dimension, recording provenance.
+    pub fn pin_at(&mut self, sym: Symbol, dim: Dimension, span: Span) -> Result<(), Diag> {
+        use crate::diag::{Diagnostic, ErrorCode, Hint};
 
         if let Some(existing) = self.symbol_dims.get(&sym) {
-            if existing != &dim {
+            if existing.dim != dim {
+                let primary = existing.sites.first().copied().unwrap_or(span);
                 return Err(Diag::new(
                     Diagnostic::error(
                         ErrorCode::DimMismatch,
                         format!("symbol `{}` has conflicting dimension constraints", sym.0),
-                        Span::empty(0),
+                        primary,
                     )
                     .with_hints(vec![
-                        Hint::ExpectedDimension(format!("{existing:?}")),
+                        Hint::ExpectedDimension(format!("{:?}", existing.dim)),
                         Hint::FoundDimension(format!("{dim:?}")),
+                        Hint::RelatedSpan(span),
                     ]),
                 ));
             }
-        } else {
-            self.symbol_dims.insert(sym, dim);
+            return Ok(());
         }
+        self.symbol_dims.insert(
+            sym,
+            SymbolConstraint {
+                dim,
+                sites: vec![span],
+            },
+        );
         Ok(())
+    }
+
+    /// Legacy pin without provenance (tests).
+    pub fn pin(&mut self, sym: Symbol, dim: Dimension) -> Result<(), Diag> {
+        self.pin_at(sym, dim, Span::empty(0))
+    }
+
+    /// Lookup a symbol's pinned dimension.
+    pub fn dimension_of(&self, sym: &Symbol) -> Option<Dimension> {
+        self.symbol_dims.get(sym).map(|c| c.dim.clone())
     }
 }
 
-/// Simplified symbolic residual (M5 expands this).
+/// Unary operators in symbolic residuals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SymUnaryOp {
+    /// Negation.
+    Neg,
+    /// Square root.
+    Sqrt,
+}
+
+/// Binary operators in symbolic residuals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SymBinaryOp {
+    /// Addition.
+    Add,
+    /// Subtraction.
+    Sub,
+    /// Multiplication.
+    Mul,
+    /// Division.
+    Div,
+    /// Exponentiation.
+    Pow,
+}
+
+/// Node in a symbolic expression tree.
+#[allow(clippy::large_enum_variant)] // `Quantity` preserves full unit syntax + provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SymNode {
+    /// Fully known quantity leaf.
+    Known(Quantity),
+    /// Free symbol leaf.
+    Symbol(Symbol),
+    /// Unary operation.
+    Unary {
+        /// Operator.
+        op: SymUnaryOp,
+        /// Operand.
+        operand: Box<SymNode>,
+    },
+    /// Binary operation.
+    Binary {
+        /// Operator.
+        op: SymBinaryOp,
+        /// Left operand.
+        left: Box<SymNode>,
+        /// Right operand.
+        right: Box<SymNode>,
+    },
+}
+
+/// Symbolic residual expression (M5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymExpr {
-    /// Display-oriented representation until M5 AST is wired.
+    /// Structured residual tree.
+    pub root: SymNode,
+    /// Display-oriented representation.
     pub text: String,
     /// Free symbols referenced.
     pub free_symbols: Vec<Symbol>,
@@ -84,6 +184,8 @@ pub struct Quantity {
     pub unit: UnitExpr,
     /// Cached dimension vector.
     pub dim: Dimension,
+    /// Source equation when produced by a pack call.
+    pub provenance: Option<Arc<EquationProvenance>>,
 }
 
 impl Quantity {
@@ -94,6 +196,7 @@ impl Quantity {
             float_mag: None,
             unit,
             dim,
+            provenance: None,
         }
     }
 
@@ -140,12 +243,14 @@ impl Quantity {
 
 impl Value {
     /// Evaluate a symbolic residual further with additional bindings (M5).
-    pub fn bind(&self, _resolver: &dyn Resolver) -> Result<Value, Diag> {
-        Err(crate::diag::Diag::new(crate::diag::Diagnostic::error(
-            crate::diag::ErrorCode::Eval,
-            "bind not yet implemented (M5 milestone)",
-            crate::diag::Span::empty(0),
-        )))
+    pub fn bind(&self, resolver: &dyn Resolver) -> Result<Value, Diag> {
+        match self {
+            Self::Known(_) => Ok(self.clone()),
+            Self::Symbolic(s) => {
+                let bound = crate::eval::partial::bind_symbolic(s, resolver)?;
+                crate::eval::partial::finalize(bound, Span::empty(0))
+            }
+        }
     }
 
     /// Free symbols in a symbolic value (empty for known).

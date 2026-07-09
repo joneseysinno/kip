@@ -59,6 +59,25 @@ pub fn convert_quantity(
         return convert_affine(q, target, registry);
     }
 
+    if q.float_mag.is_some() {
+        let anchor_f = q.as_f64() * ratio_to_f64(unit_to_anchor_factor(&q.unit, registry)?);
+        let target_f = ratio_to_f64(unit_to_anchor_factor(target, registry)?);
+        if target_f == 0.0 {
+            return Err(Diag::new(Diagnostic::error(
+                ErrorCode::Eval,
+                "zero conversion factor",
+                Span::empty(0),
+            )));
+        }
+        return Ok(Quantity {
+            magnitude: Ratio::from_integer(1),
+            float_mag: Some(anchor_f / target_f),
+            unit: target.clone(),
+            dim: target_dim,
+            provenance: q.provenance.clone(),
+        });
+    }
+
     let anchor = magnitude_in_anchor_units(q, registry)?;
     let target_factor = unit_to_anchor_factor(target, registry)?;
     if target_factor.is_zero() {
@@ -97,6 +116,7 @@ pub fn unify_add(
                 float_mag: None,
                 unit: left.unit.clone(),
                 dim: left.dim.clone(),
+                provenance: left.provenance.clone(),
             });
         }
         use crate::eval::affine::{absolute_from_rankine, to_rankine};
@@ -117,6 +137,7 @@ pub fn unify_add(
         float_mag: None,
         unit: left.unit.clone(),
         dim: left.dim.clone(),
+        provenance: left.provenance.clone(),
     })
 }
 
@@ -145,6 +166,7 @@ pub fn unify_sub(
                 float_mag: None,
                 unit: left.unit.clone(),
                 dim: left.dim.clone(),
+                provenance: left.provenance.clone(),
             });
         }
         use crate::eval::affine::{absolute_from_rankine, to_rankine};
@@ -165,6 +187,7 @@ pub fn unify_sub(
         float_mag: None,
         unit: left.unit.clone(),
         dim: left.dim.clone(),
+        provenance: left.provenance.clone(),
     })
 }
 
@@ -172,13 +195,28 @@ pub fn unify_sub(
 pub fn combine_mul(left: &Quantity, right: &Quantity, _span: Span) -> Result<Quantity, Diag> {
     let unit = compose_unit_expr(&left.unit, &right.unit, true);
     let dim = left.dim.mul(&right.dim);
+    if left.float_mag.is_some() || right.float_mag.is_some() {
+        return Ok(Quantity {
+            magnitude: Ratio::from_integer(1),
+            float_mag: Some(left.as_f64() * right.as_f64()),
+            unit,
+            dim,
+            provenance: left.provenance.clone().or(right.provenance.clone()),
+        });
+    }
     let mag = rational_mul(left.effective_magnitude(), right.effective_magnitude())?;
-    Ok(Quantity::new(mag, unit, dim))
+    Ok(Quantity {
+        magnitude: mag,
+        float_mag: None,
+        unit,
+        dim,
+        provenance: left.provenance.clone().or(right.provenance.clone()),
+    })
 }
 
 /// Divide two quantities.
 pub fn combine_div(left: &Quantity, right: &Quantity, span: Span) -> Result<Quantity, Diag> {
-    if right.effective_magnitude().is_zero() {
+    if right.as_f64() == 0.0 {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
             "division by zero",
@@ -187,8 +225,23 @@ pub fn combine_div(left: &Quantity, right: &Quantity, span: Span) -> Result<Quan
     }
     let unit = compose_unit_expr(&left.unit, &right.unit, false);
     let dim = left.dim.div(&right.dim);
+    if left.float_mag.is_some() || right.float_mag.is_some() {
+        return Ok(Quantity {
+            magnitude: Ratio::from_integer(1),
+            float_mag: Some(left.as_f64() / right.as_f64()),
+            unit,
+            dim,
+            provenance: left.provenance.clone().or(right.provenance.clone()),
+        });
+    }
     let mag = rational_div(left.effective_magnitude(), right.effective_magnitude())?;
-    Ok(Quantity::new(mag, unit, dim))
+    Ok(Quantity {
+        magnitude: mag,
+        float_mag: None,
+        unit,
+        dim,
+        provenance: left.provenance.clone().or(right.provenance.clone()),
+    })
 }
 
 /// Raise quantity to a dimensionless exponent.

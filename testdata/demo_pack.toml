@@ -1,0 +1,22 @@
+[pack]
+id      = "demo"
+title   = "Textbook-generic structural demo equations"
+edition = "test"
+license = "MIT OR Apache-2.0"
+
+[[equation]]
+id        = "fr"
+namespace = "ACI"
+cite      = "demo §1 (not ACI copyrighted text)"
+result    = "psi"
+body      = "7.5 * lambda * sqrt(fc)"
+
+  [[equation.arg]]
+  name  = "fc"
+  unit  = "psi"
+  range = { min = "2500 psi", max = "10000 psi", severity = "error" }
+
+  [[equation.arg]]
+  name    = "lambda"
+  unit    = "1"
+  default = "1.0"

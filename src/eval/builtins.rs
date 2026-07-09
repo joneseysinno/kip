@@ -6,7 +6,7 @@ use num_traits::Signed;
 use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::dim::{BaseDim, Dimension};
 use crate::eval::units::{convert_quantity, halve_dimension};
-use crate::eval::value::{Quantity, Value};
+use crate::eval::value::{Quantity, SymUnaryOp, Value};
 use crate::quantity::{UnitExpr, UnitExponent};
 use crate::registry::Registry;
 
@@ -41,26 +41,41 @@ pub fn eval_builtin(
 }
 
 fn eval_sqrt(args: &[Value], span: Span) -> Result<Value, Diag> {
-    let q = require_quantity(args, 1, span)?;
-    if q.effective_magnitude().is_negative() {
+    if args.len() != 1 {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
-            "square root of negative value",
+            format!("`sqrt` requires 1 argument, found {}", args.len()),
             span,
         )));
     }
-    let dim = halve_dimension(&q.dim)?;
-    let mag_f = q.as_f64().sqrt();
-    let unit = UnitExpr::Pow {
-        base: Box::new(q.unit.clone()),
-        exp: UnitExponent::Ratio { num: 1, den: 2 },
-    };
-    Ok(Value::Known(Quantity {
-        magnitude: Ratio::from_integer(1),
-        float_mag: Some(mag_f),
-        unit,
-        dim,
-    }))
+    match &args[0] {
+        Value::Known(q) => {
+            if q.effective_magnitude().is_negative() {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::Eval,
+                    "square root of negative value",
+                    span,
+                )));
+            }
+            let dim = halve_dimension(&q.dim)?;
+            let mag_f = q.as_f64().sqrt();
+            let unit = UnitExpr::Pow {
+                base: Box::new(q.unit.clone()),
+                exp: UnitExponent::Ratio { num: 1, den: 2 },
+            };
+            Ok(Value::Known(Quantity {
+                magnitude: Ratio::from_integer(1),
+                float_mag: Some(mag_f),
+                unit,
+                dim,
+                provenance: None,
+            }))
+        }
+        Value::Symbolic(s) => Ok(crate::eval::partial::symbolic_unary(
+            SymUnaryOp::Sqrt,
+            s,
+        )),
+    }
 }
 
 fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> Result<Value, Diag> {
@@ -120,6 +135,7 @@ fn eval_trig(
         float_mag: Some(out),
         unit: UnitExpr::one(),
         dim: Dimension::dimensionless(),
+        provenance: None,
     }))
 }
 
@@ -184,6 +200,7 @@ fn eval_transcendental(name: &str, args: &[Value], span: Span) -> Result<Value, 
         float_mag: Some(out),
         unit: UnitExpr::one(),
         dim: Dimension::dimensionless(),
+        provenance: None,
     }))
 }
 
@@ -253,5 +270,6 @@ fn float_quantity(base: &Quantity, f: f64) -> Quantity {
         float_mag: Some(f),
         unit: base.unit.clone(),
         dim: base.dim.clone(),
+        provenance: base.provenance.clone(),
     }
 }

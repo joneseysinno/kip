@@ -20,7 +20,8 @@
 //! ## Version 0.1.0 scope
 //!
 //! M0 skeleton, **M1 lexer** (§3–§4), **M2 registry** (§6), **M3 parser** (§5),
-//! and **M4 evaluator** (known values). Partial evaluation (M5) and equation packs (M6) follow.
+//! **M4 evaluator** (known values), **M5 partial evaluation** (symbolic residuals),
+//! and **M6 equation packs** (code equations).
 
 #![warn(clippy::mod_module_files)]
 #![warn(missing_docs)]
@@ -39,13 +40,16 @@ mod resolver;
 pub use diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Severity, Span};
 pub use dim::{BaseDim, CustomDimId, Dimension};
 pub use eval::{eval, Value};
-pub use eval::value::{ConstraintSet, Quantity, SymExpr, Symbol};
+pub use eval::value::{ConstraintSet, EquationProvenance, Quantity, SymBinaryOp, SymExpr, SymNode, SymUnaryOp, Symbol};
 pub use fmt::FmtOptions;
 pub use lexer::{lex, lex_checked, LexOutcome, LexSpan, SpannedToken, Token};
 pub use parser::{parse, parse_checked, BinaryOp, Callee, CallArg, CmpOp, Expr, ExprKind, ExprNode, NodeId, ParseOutcome, UnaryOp};
 pub use quantity::UnitExpr;
 pub use registry::{Registry, RegistryBuilder};
 pub use resolver::{EmptyResolver, MapResolver, Resolver};
+pub use packs::equation::{EquationRecord, EquationRegistry};
+#[cfg(feature = "packs")]
+pub use packs::{load_packs, load_packs_into, DEMO_PACK_TOML};
 
 #[cfg(feature = "parallel")]
 pub use eval::{eval_batch, eval_scenarios};

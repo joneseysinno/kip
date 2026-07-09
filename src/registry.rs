@@ -18,6 +18,11 @@ use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::eval::value::Quantity;
 use crate::quantity::UnitExpr;
 
+#[cfg(feature = "packs")]
+use crate::packs::equation::{EquationRecord, EquationRegistry};
+#[cfg(not(feature = "packs"))]
+use crate::packs::equation::EquationRegistry;
+
 pub use defs::parse_defs;
 
 /// Stable unit identifier within a registry generation.
@@ -85,6 +90,7 @@ pub struct Registry {
     name_index: Arc<BTreeMap<String, UnitId>>,
     custom_dims: Arc<BTreeMap<String, CustomDimId>>,
     custom_dim_names: Arc<Vec<(CustomDimId, String)>>,
+    equations: EquationRegistry,
 }
 
 impl Registry {
@@ -113,6 +119,11 @@ impl Registry {
     /// Custom dimension id by name.
     pub fn custom_dimension(&self, name: &str) -> Option<CustomDimId> {
         self.custom_dims.get(name).copied()
+    }
+
+    /// Loaded code equations for this registry generation.
+    pub fn equations(&self) -> &EquationRegistry {
+        &self.equations
     }
 
     /// Begin a new generation extending this registry (COW).
@@ -264,6 +275,8 @@ pub struct RegistryBuilder {
     pub(crate) custom_dims: BTreeMap<String, CustomDimId>,
     pub(crate) unit_spans: BTreeMap<String, Span>,
     next_custom_dim: u32,
+    #[cfg(feature = "packs")]
+    pub(crate) equations: BTreeMap<String, Arc<EquationRecord>>,
 }
 
 impl RegistryBuilder {
@@ -281,6 +294,8 @@ impl RegistryBuilder {
             custom_dims: BTreeMap::new(),
             unit_spans: BTreeMap::new(),
             next_custom_dim: 0,
+            #[cfg(feature = "packs")]
+            equations: BTreeMap::new(),
         }
     }
 
@@ -299,6 +314,10 @@ impl RegistryBuilder {
                 units.insert(alias.clone(), u.clone());
             }
         }
+        let mut equations = BTreeMap::new();
+        for eq in reg.equations.equations() {
+            equations.insert(eq.path_key.clone(), eq.clone());
+        }
         Self {
             generation: reg.generation + 1,
             anchors,
@@ -307,12 +326,31 @@ impl RegistryBuilder {
             custom_dims: reg.custom_dims.as_ref().clone(),
             unit_spans: BTreeMap::new(),
             next_custom_dim: reg.custom_dims.len() as u32,
+            #[cfg(feature = "packs")]
+            equations,
         }
     }
 
     /// Parse `define` / `dimension` / `anchor` lines from text.
     pub fn parse_defs(&mut self, src: &str) -> Result<(), Diag> {
         parse_defs(self, src)
+    }
+
+    /// Load equation packs from TOML (requires `packs` feature).
+    pub fn load_packs(&mut self, src: &str) -> Result<(), Diag> {
+        #[cfg(feature = "packs")]
+        {
+            crate::packs::loader::load_packs_into(self, src)
+        }
+        #[cfg(not(feature = "packs"))]
+        {
+            let _ = src;
+            Err(Diag::new(Diagnostic::error(
+                ErrorCode::PackParse,
+                "equation packs require the `packs` feature",
+                Span::empty(0),
+            )))
+        }
     }
 
     /// Programmatic unit definition (same checks as text form).
@@ -425,6 +463,16 @@ impl RegistryBuilder {
             name_index: Arc::new(name_index),
             custom_dims: Arc::new(self.custom_dims),
             custom_dim_names: Arc::new(custom_dim_names),
+            equations: {
+                #[cfg(feature = "packs")]
+                {
+                    EquationRegistry::from_map(self.equations)
+                }
+                #[cfg(not(feature = "packs"))]
+                {
+                    EquationRegistry::empty()
+                }
+            },
         })
     }
 
