@@ -2,7 +2,14 @@
 
 pub mod ftin;
 
+use num_rational::Ratio;
+use num_traits::{One, Zero};
+
+use crate::dim::BaseDim;
+use crate::eval::units::magnitude_in_anchor_units;
 use crate::eval::value::Quantity;
+use crate::quantity::UnitExpr;
+use crate::registry::Registry;
 
 /// Formatting options for quantity display.
 #[derive(Debug, Clone)]
@@ -13,6 +20,8 @@ pub struct FmtOptions {
     pub prefer_ft_in: bool,
     /// Ft-in denominator for snapping (e.g. 16 for sixteenths).
     pub ft_in_denominator: u32,
+    /// Convert to this unit before display when set.
+    pub preferred_unit: Option<String>,
 }
 
 impl Default for FmtOptions {
@@ -21,26 +30,84 @@ impl Default for FmtOptions {
             precision: 6,
             prefer_ft_in: false,
             ft_in_denominator: 16,
+            preferred_unit: None,
         }
     }
 }
 
-/// Format a quantity per options (M7 expands; M0 is minimal).
-pub fn format_quantity(q: &Quantity, opts: &FmtOptions) -> String {
-    if q.is_exact() {
-        format!(
-            "{} {} {}",
-            q.magnitude.numer(),
-            if q.magnitude.denom() != &1i128 {
-                format!("/{}", q.magnitude.denom())
-            } else {
-                String::new()
-            },
-            q.unit.as_str()
-        )
-        .trim()
-        .to_string()
+impl FmtOptions {
+    /// Options for engineering calc sheets: ft-in lengths, sixteenths.
+    pub fn calc_sheet() -> Self {
+        Self {
+            precision: 4,
+            prefer_ft_in: true,
+            ft_in_denominator: 16,
+            preferred_unit: None,
+        }
+    }
+}
+
+/// Format a quantity per options (never mutates the input quantity).
+pub fn format_quantity(q: &Quantity, registry: &Registry, opts: &FmtOptions) -> String {
+    let display = if let Some(pref) = &opts.preferred_unit {
+        q.convert_to(&UnitExpr::named(pref), registry)
+            .unwrap_or_else(|_| q.clone())
     } else {
-        format!("{:.prec$} {}", q.as_f64(), q.unit.as_str(), prec = opts.precision)
+        q.clone()
+    };
+
+    if opts.prefer_ft_in && is_length(&display.dim) {
+        if let Ok(s) = format_length_ft_in(&display, registry, opts) {
+            return s;
+        }
+    }
+
+    format_magnitude_unit(&display, opts)
+}
+
+fn is_length(dim: &crate::dim::Dimension) -> bool {
+    dim == &crate::dim::Dimension::single(BaseDim::Length, Ratio::one())
+}
+
+fn format_length_ft_in(
+    q: &Quantity,
+    registry: &Registry,
+    opts: &FmtOptions,
+) -> Result<String, crate::Diag> {
+    let inches_unit = UnitExpr::named("in");
+    let in_q = q.convert_to(&inches_unit, registry)?;
+    if in_q.float_mag.is_none() {
+        if let Some(s) = ftin::render_inches_exact(in_q.effective_magnitude(), opts.ft_in_denominator)
+        {
+            return Ok(s);
+        }
+    }
+    let anchor = magnitude_in_anchor_units(&in_q, registry)?;
+    let total = if in_q.float_mag.is_some() {
+        in_q.as_f64()
+    } else {
+        let n: f64 = num_traits::ToPrimitive::to_f64(anchor.numer()).unwrap_or(0.0);
+        let d: f64 = num_traits::ToPrimitive::to_f64(anchor.denom()).unwrap_or(1.0);
+        n / d
+    };
+    Ok(ftin::render_inches(total, opts.ft_in_denominator))
+}
+
+fn format_magnitude_unit(q: &Quantity, opts: &FmtOptions) -> String {
+    let unit = format!("{}", q.unit);
+    if q.float_mag.is_some() {
+        return format!("{:.prec$} {unit}", q.as_f64(), prec = opts.precision);
+    }
+    if q.magnitude.is_zero() {
+        return format!("0 {unit}");
+    }
+    if q.magnitude.denom() == &1i128 {
+        format!("{} {unit}", q.magnitude.numer())
+    } else {
+        format!(
+            "{}/{} {unit}",
+            q.magnitude.numer(),
+            q.magnitude.denom()
+        )
     }
 }

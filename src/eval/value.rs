@@ -231,8 +231,8 @@ impl Quantity {
     }
 
     /// Format for display (M7).
-    pub fn display(&self, opts: &crate::FmtOptions) -> String {
-        crate::fmt::format_quantity(self, opts)
+    pub fn display(&self, registry: &crate::Registry, opts: &crate::FmtOptions) -> String {
+        crate::fmt::format_quantity(self, registry, opts)
     }
 
     /// Effective rational magnitude for exact arithmetic.

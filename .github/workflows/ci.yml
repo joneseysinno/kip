@@ -26,3 +26,10 @@ jobs:
           components: miri
       - run: cargo miri setup
       - run: cargo miri test --all-features
+
+  loom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: RUSTFLAGS="--cfg loom" cargo test --features parallel --test loom_models

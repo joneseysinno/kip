@@ -14,6 +14,7 @@ use crate::registry::Registry;
 use crate::resolver::Resolver;
 
 pub use value::Value;
+pub use known::PARALLEL_THRESHOLD;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

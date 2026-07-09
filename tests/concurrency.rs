@@ -44,3 +44,23 @@ fn eval_is_deterministic_across_threads() {
         assert_eq!(result, first);
     }
 }
+
+#[test]
+fn eval_batch_matches_serial() {
+    let reg = RegistryBuilder::from_seed().freeze();
+    let srcs = ["1 ft + 6 in", "12 ft - 6 in", "sqrt(4000 psi)"];
+    let exprs: Vec<_> = srcs
+        .iter()
+        .map(|s| parse(s, &reg).expect("parse"))
+        .collect();
+    let serial: Vec<_> = exprs
+        .iter()
+        .map(|e| eval(e.as_ref(), &reg, &EmptyResolver).expect("eval"))
+        .collect();
+    let refs: Vec<_> = exprs.iter().map(|e| e.as_ref()).collect();
+    let batch = kip::eval_batch(refs, &reg, &EmptyResolver);
+    assert_eq!(serial.len(), batch.len());
+    for (a, b) in serial.iter().zip(batch) {
+        assert_eq!(a, b.as_ref().unwrap());
+    }
+}

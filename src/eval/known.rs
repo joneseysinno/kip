@@ -1,4 +1,4 @@
-//! Iterative expression evaluation with partial folding (M4/M5).
+//! Iterative expression evaluation with partial folding (M4/M5/M7).
 
 use std::collections::HashMap;
 
@@ -15,24 +15,80 @@ use crate::parser::ast::{
 use crate::registry::Registry;
 use crate::resolver::Resolver;
 
+/// Minimum subtree node count before `rayon::join` splits siblings (M7).
+#[cfg(feature = "parallel")]
+pub const PARALLEL_THRESHOLD: usize = 32;
+
+/// Minimum subtree node count before `rayon::join` splits siblings (M7).
+#[cfg(not(feature = "parallel"))]
+pub const PARALLEL_THRESHOLD: usize = usize::MAX;
+
 /// Evaluate `expr` against a frozen registry and symbol resolver.
 pub(crate) fn eval_known(
     expr: &Expr,
     registry: &Registry,
     resolver: &dyn Resolver,
 ) -> Result<Value, Diag> {
-    let order = postorder(expr, expr.root);
-    let mut values: HashMap<NodeId, Value> = HashMap::with_capacity(order.len());
-
-    for id in order {
-        let value = eval_node(expr, id, &values, registry, resolver)?;
-        values.insert(id, value);
-    }
-
+    let sizes = compute_subtree_sizes(expr);
+    let mut values = eval_tree(expr, expr.root, registry, resolver, &sizes)?;
     let root = values
         .remove(&expr.root)
         .ok_or_else(|| Diag::new(Diagnostic::error(ErrorCode::Eval, "empty expression", Span::empty(0))))?;
     finalize(root, expr.root_node().span)
+}
+
+fn eval_tree(
+    expr: &Expr,
+    id: NodeId,
+    registry: &Registry,
+    resolver: &dyn Resolver,
+    sizes: &[usize],
+) -> Result<HashMap<NodeId, Value>, Diag> {
+    #[cfg(feature = "parallel")]
+    {
+        if let ExprKind::Binary { left, right, op } = &expr.node(id).kind {
+            if sizes[left.0 as usize] >= PARALLEL_THRESHOLD
+                && sizes[right.0 as usize] >= PARALLEL_THRESHOLD
+            {
+                let span = expr.node(id).span;
+                let (left_map, right_map) = rayon::join(
+                    || eval_tree(expr, *left, registry, resolver, sizes),
+                    || eval_tree(expr, *right, registry, resolver, sizes),
+                );
+                let mut values = left_map?;
+                values.extend(right_map?);
+                let lhs = values
+                    .get(left)
+                    .cloned()
+                    .ok_or_else(|| missing_child(span))?;
+                let rhs = values
+                    .get(right)
+                    .cloned()
+                    .ok_or_else(|| missing_child(span))?;
+                values.insert(id, eval_binary(*op, &lhs, &rhs, registry, span)?);
+                return Ok(values);
+            }
+        }
+    }
+
+    eval_sequential(expr, id, registry, resolver)
+}
+
+fn eval_sequential(
+    expr: &Expr,
+    root: NodeId,
+    registry: &Registry,
+    resolver: &dyn Resolver,
+) -> Result<HashMap<NodeId, Value>, Diag> {
+    let order = postorder(expr, root);
+    let mut values: HashMap<NodeId, Value> = HashMap::with_capacity(order.len());
+
+    for node_id in order {
+        let value = eval_node(expr, node_id, &values, registry, resolver)?;
+        values.insert(node_id, value);
+    }
+
+    Ok(values)
 }
 
 fn eval_node(
@@ -148,6 +204,29 @@ fn missing_child(span: Span) -> Diag {
         "internal evaluation error: missing child value",
         span,
     ))
+}
+
+fn compute_subtree_sizes(expr: &Expr) -> Vec<usize> {
+    let mut sizes = vec![1usize; expr.nodes.len()];
+    for id in postorder(expr, expr.root) {
+        let children = match &expr.node(id).kind {
+            ExprKind::Unary { operand, .. } => sizes[operand.0 as usize],
+            ExprKind::Binary { left, right, .. } => {
+                sizes[left.0 as usize] + sizes[right.0 as usize]
+            }
+            ExprKind::Call { args, .. } => args
+                .iter()
+                .map(|arg| match arg {
+                    CallArg::Positional(node) | CallArg::Named { value: node, .. } => {
+                        sizes[node.0 as usize]
+                    }
+                })
+                .sum(),
+            _ => 0,
+        };
+        sizes[id.0 as usize] = 1 + children;
+    }
+    sizes
 }
 
 fn postorder(expr: &Expr, root: NodeId) -> Vec<NodeId> {
