@@ -134,6 +134,12 @@ impl<'a> Lexer<'a> {
         if self.try_two_char(b':', b':', Token::ColonColon) {
             return;
         }
+        if self.bytes[self.pos] == b':' {
+            let start = self.pos;
+            self.pos += 1;
+            self.push(Token::Colon, start, self.pos);
+            return;
+        }
 
         let (token, len) = match b {
             b'+' => (Token::Plus, 1),

@@ -2,15 +2,17 @@
 
 Pure, thread-safe engineering expression evaluator for **US imperial units**, with exact rational arithmetic, partial (symbolic) evaluation, empirical code equations, and a user-extensible unit registry.
 
-## Status: 0.1.0 (M0 + M1 lexer)
+## Status: 0.1.0 (M0 + M1 lexer + M2 registry)
 
-M0 skeleton plus the **M1 lexer** per [`grammar-spec.md`](grammar-spec.md) §3–§4. Parser (M3), evaluator (M4), and equation packs (M6) follow in upcoming releases.
+M0 skeleton, **M1 lexer** (grammar §3–§4), and **M2 registry** (§6) are implemented.
+Parser (M3), evaluator (M4), and equation packs (M6) follow.
 
 ```rust
-use kip::{lex, Token};
+use kip::RegistryBuilder;
 
-let tokens = lex(r#"12'-6""#).unwrap();
-assert!(matches!(tokens[0].token, Token::FtIn { .. }));
+let mut b = RegistryBuilder::from_seed();
+b.parse_defs("define tonf, tons = 2000 lbf").unwrap();
+let reg = b.freeze();
 ```
 
 ## Three load-bearing requirements

@@ -1,121 +1,233 @@
 //! Built-in imperial seed data: anchors, derived units, affine temperatures.
 
-use std::collections::BTreeMap;
-
 use num_rational::Ratio;
 use num_traits::{FromPrimitive, One};
 
 use super::{RegistryBuilder, UnitRecord};
-use crate::dim::BaseDim;
+use crate::dim::{BaseDim, Dimension};
+use crate::registry::anchor::DimAnchor;
 
 /// Build generation-0 registry with default anchors: `in`, `lbf`, `s`, `°R`, `rad`.
 pub fn seed_builder() -> RegistryBuilder {
-    let mut b = RegistryBuilder {
-        generation: 0,
-        anchors: default_anchors(),
-        pending_anchors: BTreeMap::new(),
-        units: BTreeMap::new(),
-        custom_dims: BTreeMap::new(),
-        next_custom_dim: 0,
-        defs_src: Vec::new(),
-    };
+    let mut b = RegistryBuilder::new_empty(0);
 
-    // Anchors (ratio 1 to themselves).
-    seed_unit(&mut b, "in", &[], BaseDim::Length, Ratio::one(), false);
-    seed_unit(&mut b, "lbf", &[], BaseDim::Force, Ratio::one(), false);
-    seed_unit(&mut b, "s", &[], BaseDim::Time, Ratio::one(), false);
-    seed_unit(&mut b, "°R", &["R"], BaseDim::Temperature, Ratio::one(), false);
-    seed_unit(&mut b, "rad", &[], BaseDim::Angle, Ratio::one(), false);
+    let length = Dimension::single(BaseDim::Length, Ratio::one());
+    let force = Dimension::single(BaseDim::Force, Ratio::one());
+    let time = Dimension::single(BaseDim::Time, Ratio::one());
+    let temp = Dimension::single(BaseDim::Temperature, Ratio::one());
+    let angle = Dimension::single(BaseDim::Angle, Ratio::one());
+    let pressure = force.div(&length).div(&length);
+    let force_length = force.mul(&length);
 
-    // Length derived (international foot; survey foot deferred — see plan §9).
-    seed_unit(&mut b, "ft", &[], BaseDim::Length, Ratio::from_i32(12).unwrap(), false);
-    seed_unit(&mut b, "yd", &[], BaseDim::Length, Ratio::from_i32(36).unwrap(), false);
+    // Anchors
+    seed_unit(&mut b, "in", &[], length.clone(), Ratio::one(), false);
+    seed_unit(&mut b, "lbf", &[], force.clone(), Ratio::one(), false);
+    seed_unit(&mut b, "s", &[], time.clone(), Ratio::one(), false);
+    seed_unit(&mut b, "°R", &["R"], temp.clone(), Ratio::one(), false);
+    seed_unit(&mut b, "rad", &[], angle.clone(), Ratio::one(), false);
+
+    b.anchors.insert(DimAnchor::Base(BaseDim::Length), "in".into());
+    b.anchors.insert(DimAnchor::Base(BaseDim::Force), "lbf".into());
+    b.anchors.insert(DimAnchor::Base(BaseDim::Time), "s".into());
+    b.anchors.insert(DimAnchor::Base(BaseDim::Temperature), "°R".into());
+    b.anchors.insert(DimAnchor::Base(BaseDim::Angle), "rad".into());
+
+    // Length
+    seed_unit(&mut b, "ft", &[], length.clone(), Ratio::from_i32(12).unwrap(), false);
+    seed_unit(&mut b, "yd", &[], length.clone(), Ratio::from_i32(36).unwrap(), false);
     seed_unit(
         &mut b,
         "mi",
         &[],
-        BaseDim::Length,
-        Ratio::from_i32(63360).unwrap(),
+        length.clone(),
+        Ratio::from_i32(63_360).unwrap(),
         false,
     );
-    seed_unit(&mut b, "mil", &[], BaseDim::Length, Ratio::new(1.into(), 1000.into()), false);
+    seed_unit(
+        &mut b,
+        "mil",
+        &[],
+        length.clone(),
+        Ratio::new(1, 1000),
+        false,
+    );
 
-    // Force derived.
+    // Force
     seed_unit(
         &mut b,
         "kip",
         &["kips"],
-        BaseDim::Force,
+        force.clone(),
         Ratio::from_i32(1000).unwrap(),
         false,
     );
 
-    // Pressure: psi = lbf/in² (stored as force/length² in derived form later; M2 reduces).
-    // M0: register as named derived with documented ratio vs lbf anchor for tests.
+    // Pressure (psi anchors the force/length² family)
+    seed_unit(&mut b, "psi", &[], pressure.clone(), Ratio::one(), false);
     seed_unit(
         &mut b,
-        "psi",
+        "ksi",
         &[],
-        BaseDim::Force,
-        Ratio::one(),
+        pressure.clone(),
+        Ratio::from_i32(1000).unwrap(),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "psf",
+        &[],
+        pressure.clone(),
+        Ratio::new(1, 144),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "ksf",
+        &[],
+        pressure.clone(),
+        Ratio::new(1000, 144),
         false,
     );
 
-    // Time derived.
-    seed_unit(&mut b, "min", &[], BaseDim::Time, Ratio::from_i32(60).unwrap(), false);
+    // Linear load / density (representative seed ratios)
+    seed_unit(
+        &mut b,
+        "plf",
+        &[],
+        force_length.clone().div(&length.clone()),
+        Ratio::one(),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "klf",
+        &[],
+        force_length.clone().div(&length),
+        Ratio::from_i32(1000).unwrap(),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "pcf",
+        &[],
+        force.clone().div(&Dimension::single(BaseDim::Length, Ratio::from_integer(1))),
+        Ratio::new(1, 1728),
+        false,
+    );
+
+    // Moment
+    seed_unit(
+        &mut b,
+        "lbf·ft",
+        &["lbf*ft"],
+        force_length.clone(),
+        Ratio::from_i32(12).unwrap(),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "kip·ft",
+        &["kip*ft"],
+        force_length.clone(),
+        Ratio::from_i32(12_000).unwrap(),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "kip·in",
+        &["kip*in"],
+        force_length,
+        Ratio::from_i32(1000).unwrap(),
+        false,
+    );
+
+    // Mass (slug = lbf·s²/ft under standard gravity)
+    let mass = force
+        .mul(&time.clone())
+        .mul(&time)
+        .div(&Dimension::single(BaseDim::Length, Ratio::from_integer(1)));
+    seed_unit(
+        &mut b,
+        "slug",
+        &[],
+        mass.clone(),
+        Ratio::new(1, 12),
+        false,
+    );
+    seed_unit(
+        &mut b,
+        "lbm",
+        &[],
+        mass,
+        Ratio::new(1, 32_174),
+        false,
+    );
+
+    // Time
+    seed_unit(&mut b, "min", &[], time.clone(), Ratio::from_i32(60).unwrap(), false);
     seed_unit(
         &mut b,
         "hr",
         &[],
-        BaseDim::Time,
+        time,
         Ratio::from_i32(3600).unwrap(),
         false,
     );
 
-    // Angle derived.
-    // Exact deg↔rad is irrational; M2 stores float metadata. Ratio placeholder for M0.
+    // Angle (high-precision rational approximation)
     seed_unit(
         &mut b,
         "deg",
         &["°"],
-        BaseDim::Angle,
-        Ratio::new(180.into(), 206_265_000_000_000i128), // ~180/π × 10¹² approximate
+        angle,
+        Ratio::new(180_000_000_000_000i128, 3_141_592_653_589_793i128),
         false,
     );
 
-    // Affine temperature views (cannot anchor).
-    seed_unit(&mut b, "°F", &[], BaseDim::Temperature, Ratio::one(), true);
-    seed_unit(&mut b, "°C", &[], BaseDim::Temperature, Ratio::one(), true);
-    seed_unit(&mut b, "K", &[], BaseDim::Temperature, Ratio::one(), true);
+    // Affine temperature views
+    seed_unit(
+        &mut b,
+        "°F",
+        &[],
+        Dimension::single(BaseDim::Temperature, Ratio::one()),
+        Ratio::one(),
+        true,
+    );
+    seed_unit(
+        &mut b,
+        "°C",
+        &[],
+        Dimension::single(BaseDim::Temperature, Ratio::one()),
+        Ratio::one(),
+        true,
+    );
+    seed_unit(
+        &mut b,
+        "K",
+        &[],
+        Dimension::single(BaseDim::Temperature, Ratio::one()),
+        Ratio::one(),
+        true,
+    );
 
-    // Dimensionless percent (plan §9 recommendation).
+    // Dimensionless percent (plan §9)
     seed_unit(
         &mut b,
         "%",
         &[],
-        BaseDim::Length, // M0 placeholder — M2 marks dimensionless
-        Ratio::new(1.into(), 100.into()),
+        Dimension::dimensionless(),
+        Ratio::new(1, 100),
         false,
     );
 
     b
 }
 
-fn default_anchors() -> BTreeMap<BaseDim, String> {
-    BTreeMap::from([
-        (BaseDim::Length, "in".into()),
-        (BaseDim::Force, "lbf".into()),
-        (BaseDim::Time, "s".into()),
-        (BaseDim::Temperature, "°R".into()),
-        (BaseDim::Angle, "rad".into()),
-    ])
-}
-
 fn seed_unit(
     b: &mut RegistryBuilder,
     name: &str,
     aliases: &[&str],
-    dimension: BaseDim,
+    dimension: Dimension,
     anchor_ratio: Ratio<i128>,
     affine: bool,
 ) {

@@ -19,8 +19,8 @@
 //!
 //! ## Version 0.1.0 scope
 //!
-//! M0 skeleton plus **M1 lexer** (`grammar-spec.md` §3–§4). Parser, evaluator, and
-//! equation packs follow in subsequent milestones.
+//! M0 skeleton, **M1 lexer** (§3–§4), and **M2 registry** (§6). Parser (M3),
+//! evaluator (M4), and equation packs (M6) follow.
 
 #![warn(clippy::mod_module_files)]
 #![warn(missing_docs)]

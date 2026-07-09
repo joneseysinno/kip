@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added (M2)
+
+- Full `RegistryBuilder::parse_defs` for `define` / `dimension` / `anchor` (grammar §6).
+- Order-free unit resolution with `E-DEF-CYCLE`, `E-DEF-SYMBOLIC`, `E-DUP-UNIT`, `E-AFFINE-DEFINE`.
+- User-selectable anchors (`set_anchor`, `anchor` text) with rebase at `freeze()` and `E-ANCHOR-*` diagnostics.
+- Expanded imperial seed data (pressure, moment, mass, `%` dimensionless).
+- `Registry::dump_defs()` round-trip for user definitions.
+- `Token::Colon` for registry primary-unit syntax.
+
 ### Added (M1)
 
 - Full lexer per `grammar-spec.md` §3–§4: numbers, identifiers/primes, `FEET`/`INCHES`/`FTIN` with bounded lookahead and clean backtrack.

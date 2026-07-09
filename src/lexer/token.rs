@@ -66,6 +66,8 @@ pub enum Token {
     UnitMul,
     /// `::` (sheet-layer annotation convention)
     ColonColon,
+    /// `:` (registry primary-unit form)
+    Colon,
     /// `>=` `<=` `>` `<` `==` (reserved v1.1)
     Gte,
     /// `<=` (reserved v1.1).
