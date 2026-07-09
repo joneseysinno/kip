@@ -79,6 +79,12 @@ pub enum ErrorCode {
     Parse,
     /// Evaluation error (generic).
     Eval,
+    /// Whitespace between number and `'`/`"` (grammar §3.3 R1).
+    TickSpace,
+    /// `'`/`"` starting a token (grammar §3.3 R4).
+    BareTick,
+    /// Zero denominator in a fraction literal (grammar §8).
+    DivZeroLiteral,
 }
 
 impl ErrorCode {
@@ -103,6 +109,9 @@ impl ErrorCode {
             Self::EqInExpr => "E-EQ-IN-EXPR",
             Self::Parse => "E-PARSE",
             Self::Eval => "E-EVAL",
+            Self::TickSpace => "E-TICK-SPACE",
+            Self::BareTick => "E-BARE-TICK",
+            Self::DivZeroLiteral => "E-DIV-ZERO-LITERAL",
         }
     }
 }
@@ -116,6 +125,16 @@ pub enum LintCode {
     ExactnessLost,
     /// `Ratio<i128>` overflow forced float fallback.
     RationalOverflow,
+    /// Spaced hyphen interpreted as feet-inch compound (grammar §3.3 R3).
+    FtInSpaced,
+    /// Inch part ≥ 12 inside a compound literal.
+    InchGe12,
+    /// Comma used as apparent digit-group separator.
+    CommaGroup,
+    /// Whitespace-separated `^` changed binding (parser).
+    SpacedCaret,
+    /// Name is both a registered unit and a resolver-known symbol (parser).
+    UnitShadow,
 }
 
 impl LintCode {
@@ -125,6 +144,11 @@ impl LintCode {
             Self::Range => "L-RANGE",
             Self::ExactnessLost => "L-EXACTNESS-LOST",
             Self::RationalOverflow => "L-RATIONAL-OVERFLOW",
+            Self::FtInSpaced => "L-FTIN-SPACED",
+            Self::InchGe12 => "L-INCH-GE-12",
+            Self::CommaGroup => "L-COMMA-GROUP",
+            Self::SpacedCaret => "L-SPACED-CARET",
+            Self::UnitShadow => "L-UNIT-SHADOW",
         }
     }
 }

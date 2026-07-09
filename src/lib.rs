@@ -19,9 +19,8 @@
 //!
 //! ## Version 0.1.0 scope
 //!
-//! This release delivers the M0 skeleton: core data model, diagnostics, registry
-//! seed scaffolding, and API contracts. Lexer, parser, evaluator, and equation
-//! packs follow in subsequent milestones.
+//! M0 skeleton plus **M1 lexer** (`grammar-spec.md` §3–§4). Parser, evaluator, and
+//! equation packs follow in subsequent milestones.
 
 #![warn(clippy::mod_module_files)]
 #![warn(missing_docs)]
@@ -42,6 +41,7 @@ pub use dim::{BaseDim, CustomDimId, Dimension};
 pub use eval::{eval, Value};
 pub use eval::value::{ConstraintSet, Quantity, SymExpr, Symbol};
 pub use fmt::FmtOptions;
+pub use lexer::{lex, lex_checked, LexOutcome, LexSpan, SpannedToken, Token};
 pub use parser::{parse, parse_checked, Expr, NodeId, ParseOutcome};
 pub use quantity::UnitExpr;
 pub use registry::{Registry, RegistryBuilder};
@@ -71,6 +71,8 @@ mod send_sync {
         assert_send_sync::<Expr>();
         assert_send_sync::<Arc<Registry>>();
         assert_send_sync::<Arc<Expr>>();
+        assert_send_sync::<SpannedToken>();
+        assert_send_sync::<Token>();
         assert_send_sync::<dyn Resolver>();
     }
 }

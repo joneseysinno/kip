@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added (M1)
+
+- Full lexer per `grammar-spec.md` §3–§4: numbers, identifiers/primes, `FEET`/`INCHES`/`FTIN` with bounded lookahead and clean backtrack.
+- Unicode tick aliases (`′` `″`), unit-expression `·`/`×`, digit separators, tight scientific notation.
+- Lexer diagnostics: `E-TICK-SPACE`, `E-BARE-TICK`, `E-DIV-ZERO-LITERAL`, `L-FTIN-SPACED`, `L-INCH-GE-12`, `L-COMMA-GROUP`.
+- `lex()` and `lex_checked()` public API; 42 lexer conformance tests; `fuzz/fuzz_lexer` target.
+
 ## [0.1.0] - 2026-07-09
 
 ### Added

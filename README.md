@@ -2,9 +2,16 @@
 
 Pure, thread-safe engineering expression evaluator for **US imperial units**, with exact rational arithmetic, partial (symbolic) evaluation, empirical code equations, and a user-extensible unit registry.
 
-## Status: 0.1.0 (M0 skeleton)
+## Status: 0.1.0 (M0 + M1 lexer)
 
-This release establishes the crate layout, core data model, diagnostics inventory, registry seed scaffolding, and concurrency contracts described in [`plan.md`](plan.md). Lexer (M1), parser (M3), evaluator (M4), and equation packs (M6) follow in upcoming releases.
+M0 skeleton plus the **M1 lexer** per [`grammar-spec.md`](grammar-spec.md) §3–§4. Parser (M3), evaluator (M4), and equation packs (M6) follow in upcoming releases.
+
+```rust
+use kip::{lex, Token};
+
+let tokens = lex(r#"12'-6""#).unwrap();
+assert!(matches!(tokens[0].token, Token::FtIn { .. }));
+```
 
 ## Three load-bearing requirements
 
