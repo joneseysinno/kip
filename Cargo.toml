@@ -1,14 +1,15 @@
 [package]
 name = "kip"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.75"
 description = "Pure thread-safe engineering expression evaluator for US imperial units"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["engineering", "units", "imperial", "expression", "evaluator"]
 categories = ["science", "mathematics"]
-repository = "https://github.com/kip-rs/kip"
+repository = "https://github.com/joneseysinno/kip"
+documentation = "https://docs.rs/kip"
 
 [features]
 default = ["packs", "parallel"]
@@ -26,7 +27,18 @@ toml = { version = "0.8", optional = true }
 rayon = { version = "1", optional = true }
 
 [dev-dependencies]
+criterion = "0.5"
 loom = "0.7"
+proptest = "1"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "parallel_sheet"
+harness = false
+required-features = ["parallel"]
 
 [[example]]
 name = "sheet"

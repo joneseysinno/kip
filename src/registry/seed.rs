@@ -32,7 +32,9 @@ pub fn seed_builder() -> RegistryBuilder {
     b.anchors.insert(DimAnchor::Base(BaseDim::Temperature), "°R".into());
     b.anchors.insert(DimAnchor::Base(BaseDim::Angle), "rad".into());
 
-    // Length
+    // Length (international foot). Survey foot (`sft`) is intentionally not seeded:
+    // NIST deprecated the US survey foot in 2023; hosts needing survey units should
+    // `define sft = ...` explicitly rather than overloading `ft`.
     seed_unit(&mut b, "ft", &[], length.clone(), Ratio::from_i32(12).unwrap(), false);
     seed_unit(&mut b, "yd", &[], length.clone(), Ratio::from_i32(36).unwrap(), false);
     seed_unit(

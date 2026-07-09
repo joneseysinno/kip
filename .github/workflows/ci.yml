@@ -33,3 +33,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: RUSTFLAGS="--cfg loom" cargo test --features parallel --test loom_models
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --no-run --features parallel
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-fuzz --locked
+      - run: cd fuzz && cargo fuzz run fuzz_lexer -- -runs=2048 -max_total_time=60
+      - run: cd fuzz && cargo fuzz run fuzz_parser -- -runs=2048 -max_total_time=60
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --all-features --no-deps

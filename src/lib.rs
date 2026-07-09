@@ -12,16 +12,31 @@
 //! (`slug = lbf·s²/ft`). There is no hidden *g*<sub>c</sub> constant in user-visible
 //! math. SI-trained users: do not expect mass to be fundamental here.
 //!
+//! ## Typical workflow
+//!
+//! 1. Build or load a [`Registry`] (`RegistryBuilder::from_seed`, [`RegistryBuilder::parse_defs`],
+//!    [`RegistryBuilder::load_packs`]).
+//! 2. [`parse`] an expression against that registry (optional [`Resolver`] for symbols).
+//! 3. [`eval`] to a [`Value`] — fully [`Quantity`] or [`eval::value::SymExpr`] residual.
+//! 4. Format with [`Quantity::display`] and [`FmtOptions`], or bind further with [`Value::bind`].
+//!
 //! ## Concurrency (P1)
 //!
-//! ASTs (`Expr`), registries (`Registry`), and evaluation are immutable and
+//! ASTs ([`Expr`]), registries ([`Registry`]), and evaluation are immutable and
 //! `Send + Sync`. Evaluation is a pure function — no globals, no locks.
+//! With the `parallel` feature: [`eval_batch`], [`eval_scenarios`], and intra-expression
+//! `rayon` splits above [`PARALLEL_THRESHOLD`] nodes.
 //!
-//! ## Version 0.1.0 scope
+//! ## Code equations (P2)
 //!
-//! M0 skeleton, **M1 lexer** (§3–§4), **M2 registry** (§6), **M3 parser** (§5),
-//! **M4 evaluator** (known values), **M5 partial evaluation** (symbolic residuals),
-//! **M6 equation packs**, and **M7 parallel helpers + formatting**.
+//! Namespaced calls such as `ACI.fr(fc: 4000 psi, lambda: 1.0)` require named arguments.
+//! Load pack TOML via [`RegistryBuilder::load_packs`] or [`load_packs`]; results carry
+//! [`EquationProvenance`] on [`Quantity`].
+//!
+//! ## Version 0.1.0
+//!
+//! Full grammar conformance (lexer → packs → parallel/fmt). See `CHANGELOG.md` and
+//! `VERSIONING.md` for release policy.
 
 #![warn(clippy::mod_module_files)]
 #![warn(missing_docs)]
