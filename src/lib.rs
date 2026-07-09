@@ -19,8 +19,8 @@
 //!
 //! ## Version 0.1.0 scope
 //!
-//! M0 skeleton, **M1 lexer** (§3–§4), and **M2 registry** (§6). Parser (M3),
-//! evaluator (M4), and equation packs (M6) follow.
+//! M0 skeleton, **M1 lexer** (§3–§4), **M2 registry** (§6), **M3 parser** (§5),
+//! and **M4 evaluator** (known values). Partial evaluation (M5) and equation packs (M6) follow.
 
 #![warn(clippy::mod_module_files)]
 #![warn(missing_docs)]
@@ -42,7 +42,7 @@ pub use eval::{eval, Value};
 pub use eval::value::{ConstraintSet, Quantity, SymExpr, Symbol};
 pub use fmt::FmtOptions;
 pub use lexer::{lex, lex_checked, LexOutcome, LexSpan, SpannedToken, Token};
-pub use parser::{parse, parse_checked, Expr, NodeId, ParseOutcome};
+pub use parser::{parse, parse_checked, BinaryOp, Callee, CallArg, CmpOp, Expr, ExprKind, ExprNode, NodeId, ParseOutcome, UnaryOp};
 pub use quantity::UnitExpr;
 pub use registry::{Registry, RegistryBuilder};
 pub use resolver::{EmptyResolver, MapResolver, Resolver};

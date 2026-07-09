@@ -1,11 +1,14 @@
 //! Expression evaluator (pure function of expr, registry, resolver).
 
+pub mod affine;
 pub mod builtins;
 pub mod constraint;
+pub mod known;
 pub mod partial;
+pub mod units;
 pub mod value;
 
-use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
+use crate::diag::Diag;
 use crate::parser::Expr;
 use crate::registry::Registry;
 use crate::resolver::Resolver;
@@ -16,14 +19,8 @@ pub use value::Value;
 use rayon::prelude::*;
 
 /// Evaluate a parsed expression against a frozen registry and symbol resolver.
-///
-/// M0 returns `E-EVAL` for all inputs; full evaluation lands in M4.
-pub fn eval(_expr: &Expr, _registry: &Registry, _resolver: &dyn Resolver) -> Result<Value, Diag> {
-    Err(Diag::new(Diagnostic::error(
-        ErrorCode::Eval,
-        "evaluator not yet implemented (M4 milestone)",
-        Span::empty(0),
-    )))
+pub fn eval(expr: &Expr, registry: &Registry, resolver: &dyn Resolver) -> Result<Value, Diag> {
+    known::eval_known(expr, registry, resolver)
 }
 
 #[cfg(feature = "parallel")]

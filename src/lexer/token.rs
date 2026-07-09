@@ -11,6 +11,11 @@ pub struct SpannedToken {
     pub token: Token,
     /// Source span.
     pub span: Span,
+    /// Whether whitespace (or a line break) preceded this token in source.
+    ///
+    /// Used by the parser to distinguish tight unit-expression operators from
+    /// spaced expression operators (grammar §5.1 W1, D5).
+    pub preceded_by_ws: bool,
 }
 
 /// Lexer token (grammar-spec §3).

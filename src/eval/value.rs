@@ -121,19 +121,20 @@ impl Quantity {
     /// Convert to another unit via registry anchor ratios (M4).
     pub fn convert_to(
         &self,
-        _unit: &UnitExpr,
-        _registry: &crate::Registry,
+        unit: &UnitExpr,
+        registry: &crate::Registry,
     ) -> Result<Quantity, Diag> {
-        Err(crate::diag::Diag::new(crate::diag::Diagnostic::error(
-            crate::diag::ErrorCode::Eval,
-            "convert_to not yet implemented (M4 milestone)",
-            crate::diag::Span::empty(0),
-        )))
+        crate::eval::units::convert_quantity(self, unit, registry)
     }
 
     /// Format for display (M7).
     pub fn display(&self, opts: &crate::FmtOptions) -> String {
         crate::fmt::format_quantity(self, opts)
+    }
+
+    /// Effective rational magnitude for exact arithmetic.
+    pub(crate) fn effective_magnitude(&self) -> Ratio<i128> {
+        self.magnitude
     }
 }
 

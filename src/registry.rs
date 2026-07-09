@@ -553,25 +553,55 @@ fn resolve_anchor_ratio(qty: &Quantity, builder: &RegistryBuilder) -> Result<Rat
             })?;
             Ok(qty.magnitude * record.anchor_ratio)
         }
-        UnitExpr::Compound(parts) => {
+        UnitExpr::Product(parts) => {
             let mut ratio = qty.magnitude;
-            let mut dim = Dimension::dimensionless();
             for part in parts {
-                if let UnitExpr::Named(name) = part {
-                    let record = builder.units.get(name).ok_or_else(|| {
-                        Diag::new(Diagnostic::error(
-                            ErrorCode::DefSymbolic,
-                            format!("unknown unit `{name}`"),
-                            Span::empty(0),
-                        ))
-                    })?;
-                    ratio *= record.anchor_ratio;
-                    dim = dim.mul(&record.dimension);
-                }
+                let part_ratio =
+                    resolve_anchor_ratio(&Quantity::new(Ratio::one(), part.clone(), qty.dim.clone()), builder)?;
+                ratio *= part_ratio;
             }
-            let _ = dim;
             Ok(ratio)
         }
+        UnitExpr::Quotient(num, den) => {
+            let num_r =
+                resolve_anchor_ratio(&Quantity::new(qty.magnitude, *num.clone(), qty.dim.clone()), builder)?;
+            let den_r = resolve_anchor_ratio(
+                &Quantity::new(Ratio::one(), *den.clone(), qty.dim.clone()),
+                builder,
+            )?;
+            Ok(num_r / den_r)
+        }
+        UnitExpr::Pow { base, exp } => {
+            let base_r =
+                resolve_anchor_ratio(&Quantity::new(qty.magnitude, *base.clone(), qty.dim.clone()), builder)?;
+            let e = unit_exponent_to_i32(exp)?;
+            Ok(if e >= 0 {
+                base_r.pow(e)
+            } else {
+                Ratio::one() / base_r.pow(-e)
+            })
+        }
+    }
+}
+
+fn unit_exponent_to_i32(exp: &crate::quantity::UnitExponent) -> Result<i32, Diag> {
+    match exp {
+        crate::quantity::UnitExponent::Int(n) => Ok(*n),
+        crate::quantity::UnitExponent::Ratio { num, den } => {
+            if *den == 0 || *num % den != 0 {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::DefSymbolic,
+                    "non-integer unit exponent in definition",
+                    Span::empty(0),
+                )));
+            }
+            Ok(num / den)
+        }
+        crate::quantity::UnitExponent::Decimal(_) => Err(Diag::new(Diagnostic::error(
+            ErrorCode::DefSymbolic,
+            "decimal unit exponent in definition",
+            Span::empty(0),
+        ))),
     }
 }
 

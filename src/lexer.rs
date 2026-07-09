@@ -54,6 +54,8 @@ struct Lexer<'a> {
     lints: Vec<Diag>,
     ftin_spaced_emitted: bool,
     comma_group_emitted: bool,
+    /// Whitespace seen since the previous emitted token.
+    next_preceded_by_ws: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -67,12 +69,14 @@ impl<'a> Lexer<'a> {
             lints: Vec::new(),
             ftin_spaced_emitted: false,
             comma_group_emitted: false,
+            next_preceded_by_ws: false,
         }
     }
 
     fn run(&mut self) {
         while self.pos < self.bytes.len() {
             if self.skip_ws() {
+                self.next_preceded_by_ws = true;
                 continue;
             }
             if self.skip_comment() {
@@ -85,6 +89,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
             self.lex_next();
+            self.next_preceded_by_ws = false;
         }
         if self.errors.is_empty() {
             self.push(Token::Eof, self.pos, self.pos);
@@ -95,7 +100,7 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         let b = self.bytes[self.pos];
 
-        if b.is_ascii_digit() || b == b'.' {
+        if b.is_ascii_digit() || (b == b'.' && self.dot_starts_number()) {
             self.lex_number_or_length(start);
             return;
         }
@@ -455,10 +460,19 @@ impl<'a> Lexer<'a> {
         self.src[pos..].chars().next()
     }
 
+    fn dot_starts_number(&self) -> bool {
+        let next = self.pos + 1;
+        self.bytes
+            .get(next)
+            .copied()
+            .is_some_and(|b| b.is_ascii_digit())
+    }
+
     fn push(&mut self, token: Token, start: usize, end: usize) {
         self.tokens.push(SpannedToken {
             token,
             span: Span::new(start, end),
+            preceded_by_ws: self.next_preceded_by_ws,
         });
     }
 

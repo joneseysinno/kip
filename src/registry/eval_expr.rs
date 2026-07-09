@@ -244,8 +244,12 @@ impl<'a> DefExprParser<'a> {
             self.bump();
             let exp_qty = self.parse_unary()?;
             let exp = ratio_to_i32(&exp_qty.magnitude)?;
+            let exp_i = *exp.numer();
             dim = dim.pow(exp);
-            unit = UnitExpr::Compound(vec![unit]);
+            unit = UnitExpr::Pow {
+                base: Box::new(unit),
+                exp: crate::quantity::UnitExponent::Int(exp_i),
+            };
         }
         Ok((unit, dim))
     }
@@ -275,10 +279,20 @@ fn compose_unit_expr(lhs: &UnitExpr, rhs: &UnitExpr, mul: bool) -> UnitExpr {
     if mul {
         match (lhs, rhs) {
             (UnitExpr::Dimensionless, u) | (u, UnitExpr::Dimensionless) => u.clone(),
-            _ => UnitExpr::Compound(vec![lhs.clone(), rhs.clone()]),
+            (UnitExpr::Product(parts), rhs) => {
+                let mut parts = parts.clone();
+                parts.push(rhs.clone());
+                UnitExpr::Product(parts)
+            }
+            (lhs, UnitExpr::Product(parts)) => {
+                let mut out = vec![lhs.clone()];
+                out.extend(parts.iter().cloned());
+                UnitExpr::Product(out)
+            }
+            _ => UnitExpr::Product(vec![lhs.clone(), rhs.clone()]),
         }
     } else {
-        UnitExpr::Compound(vec![lhs.clone(), rhs.clone()])
+        UnitExpr::Quotient(Box::new(lhs.clone()), Box::new(rhs.clone()))
     }
 }
 
