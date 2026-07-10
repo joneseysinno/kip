@@ -115,7 +115,7 @@ pub fn eval_equation_call(
                 )));
             }
             if q.unit != eq.result_unit {
-                q = convert_quantity(&q, &eq.result_unit, registry)?;
+                q = convert_quantity(&q, &eq.result_unit, registry, lints, span)?;
             }
             q.provenance = Some(Arc::new(eq.provenance.clone()));
             Ok(Value::Known(q))
@@ -174,7 +174,7 @@ fn check_range(
     span: Span,
     lints: &mut LintSink,
 ) -> Result<Quantity, Diag> {
-    let in_contract = convert_quantity(q, &contract.unit, registry)?;
+    let in_contract = convert_quantity(q, &contract.unit, registry, lints, span)?;
     let Some(range) = &contract.range else {
         return Ok(in_contract);
     };

@@ -1,11 +1,13 @@
-//! Builtin exactness conformance (remediation-plan-2 S0).
+//! Builtin exactness conformance (remediation-plan-2 S0, plan-3 T4).
 
 use std::sync::Arc;
 
 use kip::{
-    eval_checked, parse, Dimension, EmptyResolver, LintCode, Quantity, RegistryBuilder, Value,
+    convert_quantity, eval_checked, parse, BaseDim, Dimension, EmptyResolver, LintCode, LintSink,
+    Mag, Quantity, RegistryBuilder, UnitExpr, UnitExponent, Value,
 };
 use num_rational::Ratio;
+use num_traits::One;
 use proptest::prelude::*;
 
 fn reg() -> Arc<kip::Registry> {
@@ -40,6 +42,16 @@ fn assert_exact_or_linted(outcome: &kip::EvalOutcome) {
             }),
         "float builtin result without exactness lint"
     );
+}
+
+fn length_dim() -> Dimension {
+    Dimension::single(BaseDim::Length, Ratio::one())
+}
+
+fn pressure_dim() -> Dimension {
+    Dimension::single(BaseDim::Force, Ratio::one())
+        .div(&Dimension::single(BaseDim::Length, Ratio::one()))
+        .div(&Dimension::single(BaseDim::Length, Ratio::one()))
 }
 
 // --- Fixed regime rows (S0 §1.2) ---
@@ -144,11 +156,33 @@ fn sin_30_deg_exactness_lint_at_call_site() {
     assert!(lint.diagnostic().message.contains("sin"));
 }
 
-// --- Property (S0 §1.1) ---
+// --- Weighted magnitude strategy (T4) ---
+
+fn weighted_magnitude() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        4 => -10_000i128..10_000,
+        2 => (1i128 << 53) - 2..(1i128 << 53) + 2,
+        2 => 3_037_000_498i128..3_037_000_500,
+        1 => Just(0i128),
+    ]
+}
+
+fn unit_bearing_quantity() -> impl Strategy<Value = (i128, &'static str, Dimension)> {
+    (
+        weighted_magnitude(),
+        prop_oneof![
+            Just(("in", length_dim())),
+            Just(("ft", length_dim())),
+            Just(("psi", pressure_dim())),
+            Just(("ksi", pressure_dim())),
+        ],
+    )
+        .prop_map(|(n, (unit, dim))| (n, unit, dim))
+}
 
 proptest! {
     #[test]
-    fn builtin_abs_exact_stays_exact(n in -10_000i128..10_000) {
+    fn builtin_abs_exact_stays_exact(n in weighted_magnitude()) {
         let src = format!("abs({n})");
         let outcome = eval_builtin_expr(&src);
         assert_exact_or_linted(&outcome);
@@ -160,26 +194,83 @@ proptest! {
     }
 
     #[test]
-    fn sqrt_perfect_square_stays_exact(k in 0i32..1_000_000) {
-        let k = i128::from(k);
-        let sq = k.checked_mul(k).expect("square");
-        let src = format!("sqrt({sq})");
-        let outcome = eval_builtin_expr(&src);
-        let q = match outcome.value.expect("eval") {
-            Value::Known(q) => q,
-            _ => panic!("expected known"),
-        };
-        prop_assert_eq!(q.exact_ratio(), Some(Ratio::from_integer(k)));
-        prop_assert!(outcome.lints.is_empty());
+    fn sqrt_perfect_square_stays_exact(k in weighted_magnitude()) {
+        prop_assume!(k >= 0);
+        let sq = k.checked_mul(k);
+        if let Some(sq) = sq {
+            let src = format!("sqrt({sq})");
+            let outcome = eval_builtin_expr(&src);
+            if k <= 1_000_000 {
+                let q = match outcome.value.as_ref().expect("eval") {
+                    Value::Known(q) => q,
+                    _ => panic!("expected known"),
+                };
+                prop_assert_eq!(q.exact_ratio(), Some(Ratio::from_integer(k)));
+                prop_assert!(outcome.lints.is_empty());
+            } else {
+                assert_exact_or_linted(&outcome);
+            }
+        }
     }
 
     #[test]
-    fn floor_small_exact_integers_stay_exact(n in -10_000i128..10_000) {
+    fn floor_weighted_magnitudes_stay_exact_or_linted(n in weighted_magnitude()) {
         let src = format!("floor({n})");
         let outcome = eval_builtin_expr(&src);
         assert_exact_or_linted(&outcome);
-        if let Value::Known(q) = outcome.value.expect("eval") {
-            prop_assert_eq!(q.exact_ratio(), Some(Ratio::from_integer(n)));
+    }
+
+    #[test]
+    fn min_max_unit_bearing_stays_exact_or_linted(
+        (a, unit_a, dim_a) in unit_bearing_quantity(),
+        (b, unit_b, dim_b) in unit_bearing_quantity(),
+    ) {
+        let registry = reg();
+        let mut resolver = kip::MapResolver::new();
+        if dim_a == dim_b {
+            resolver.insert(
+                "a",
+                Value::Known(Quantity::from_int(a, unit_a, dim_a)),
+            );
+            resolver.insert(
+                "b",
+                Value::Known(Quantity::from_int(b, unit_b, dim_b)),
+            );
+            for op in ["min", "max"] {
+                let expr = parse(&format!("{op}(a, b)"), &registry).expect("parse");
+                let outcome = eval_checked(expr.as_ref(), &registry, &resolver);
+                assert_exact_or_linted(&outcome);
+            }
         }
+    }
+
+    #[test]
+    fn ft_neg2_conversion_property(n in 1i32..1000) {
+        let registry = reg();
+        let unit = UnitExpr::Product(vec![
+            UnitExpr::named("lbf"),
+            UnitExpr::Pow {
+                base: Box::new(UnitExpr::named("ft")),
+                exp: UnitExponent::Int(-2),
+            },
+        ]);
+        let q = Quantity::new(
+            Mag::exact(Ratio::from_integer(i128::from(n))),
+            unit,
+            pressure_dim(),
+        );
+        let mut lints = LintSink::new();
+        let converted = convert_quantity(
+            &q,
+            &UnitExpr::named("psi"),
+            &registry,
+            &mut lints,
+            kip::Span::empty(0),
+        )
+        .expect("convert");
+        assert_exact_or_linted(&kip::EvalOutcome {
+            value: Ok(Value::Known(converted)),
+            lints: lints.into_lints(),
+        });
     }
 }

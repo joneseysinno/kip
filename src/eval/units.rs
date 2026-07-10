@@ -5,12 +5,13 @@
 use std::cmp::Ordering;
 
 use num_rational::Ratio;
-use num_traits::{FromPrimitive, One, Zero};
+use num_traits::{CheckedDiv, FromPrimitive, One};
 
 use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Span};
 use crate::dim::Dimension;
 use crate::eval::lint_sink::LintSink;
 use crate::eval::mag::{Mag, MagOpResult, TaintEvent};
+use crate::eval::rational::{checked_ratio_pow, rational_sqrt};
 use crate::eval::value::Quantity;
 use crate::quantity::{UnitExpr, UnitExponent};
 use crate::registry::Registry;
@@ -42,21 +43,9 @@ pub fn dimension_of_unit(unit: &UnitExpr, registry: &Registry) -> Result<Dimensi
 /// Anchor-space magnitude (carries taint; never laundered to a bare `Ratio`).
 pub fn magnitude_in_anchor_units(q: &Quantity, registry: &Registry) -> Result<Mag, Diag> {
     let factor = unit_to_anchor_factor(&q.unit, registry)?;
-    match q.mag {
-        Mag::Exact(r) => {
-            let result = Mag::Exact(r).mul(Mag::Exact(factor));
-            // R0: events dropped at display boundary (no lint sink in fmt).
-            match result.mag {
-                Mag::Exact(m) => Ok(Mag::Exact(m)),
-                Mag::Float(f) => Mag::float(f).map_err(|_| non_finite(Span::empty(0))),
-            }
-        }
-        Mag::Float(f) => {
-            #[allow(clippy::arithmetic_side_effects)] // tainted float anchor conversion.
-            let anchor_f = f * ratio_to_f64(factor);
-            Mag::float(anchor_f).map_err(|_| non_finite(Span::empty(0)))
-        }
-    }
+    let mut lints = LintSink::new();
+    let anchor = apply_factor(q.mag, factor);
+    finalize_mag(anchor, &mut lints, Span::empty(0), "anchor magnitude")
 }
 
 /// Convert a quantity to another unit expression (same dimension).
@@ -64,13 +53,15 @@ pub fn convert_quantity(
     q: &Quantity,
     target: &UnitExpr,
     registry: &Registry,
+    lints: &mut LintSink,
+    span: Span,
 ) -> Result<Quantity, Diag> {
     let target_dim = dimension_of_unit(target, registry)?;
     if q.dim != target_dim {
         return Err(dim_mismatch(
             &q.dim,
             &target_dim,
-            Span::empty(0),
+            span,
             "cannot convert between different dimensions",
         ));
     }
@@ -79,63 +70,55 @@ pub fn convert_quantity(
         return convert_affine(q, target, registry);
     }
 
+    let src_factor = unit_to_anchor_factor(&q.unit, registry)?;
+    let dst_factor = unit_to_anchor_factor(target, registry)?;
+
     match q.mag {
         Mag::Float(_) => {
-            let anchor_f = q.as_f64() * ratio_to_f64(unit_to_anchor_factor(&q.unit, registry)?);
-            let target_f = ratio_to_f64(unit_to_anchor_factor(target, registry)?);
-            if target_f == 0.0 {
+            if dst_factor.mag.is_zero() {
                 return Err(Diag::new(Diagnostic::error(
                     ErrorCode::Eval,
                     "zero conversion factor",
-                    Span::empty(0),
+                    span,
                 )));
             }
+            #[allow(clippy::arithmetic_side_effects)] // tainted float anchor conversion.
+            let anchor_f = q.as_f64() * src_factor.mag.as_f64();
+            let target_f = dst_factor.mag.as_f64();
+            #[allow(clippy::arithmetic_side_effects)]
             let f = anchor_f / target_f;
+            let mag = Mag::float(f).map_err(|_| non_finite(span))?;
             Ok(Quantity {
-                mag: Mag::float(f).map_err(|_| non_finite(Span::empty(0)))?,
+                mag,
                 unit: target.clone(),
                 dim: target_dim,
                 provenance: q.provenance.clone(),
             })
         }
         Mag::Exact(_) => {
-            let anchor = magnitude_in_anchor_units(q, registry)?;
-            let target_factor = unit_to_anchor_factor(target, registry)?;
-            if target_factor.is_zero() {
+            if dst_factor.mag.is_zero() {
                 return Err(Diag::new(Diagnostic::error(
                     ErrorCode::Eval,
                     "zero conversion factor",
-                    Span::empty(0),
+                    span,
                 )));
             }
-            let mag = match anchor {
-                Mag::Exact(r) => {
-                    let result = Mag::Exact(r)
-                        .div(Mag::Exact(target_factor))
-                        .map_err(|_| {
-                            Diag::new(Diagnostic::error(
-                                ErrorCode::Eval,
-                                "division by zero",
-                                Span::empty(0),
-                            ))
-                        })?;
-                    result.mag
-                }
-                Mag::Float(f) => {
-                    let tf = ratio_to_f64(target_factor);
-                    if tf == 0.0 {
-                        return Err(Diag::new(Diagnostic::error(
-                            ErrorCode::Eval,
-                            "zero conversion factor",
-                            Span::empty(0),
-                        )));
-                    }
-                    // f64 path: input already tainted or overflowed to float upstream.
-                    #[allow(clippy::arithmetic_side_effects)]
-                    let mag_f = f / tf;
-                    Mag::float(mag_f).map_err(|_| non_finite(Span::empty(0)))?
-                }
+            let anchor = apply_factor(q.mag, src_factor);
+            let result = anchor
+                .mag
+                .div(dst_factor.mag)
+                .map_err(|_| {
+                    Diag::new(Diagnostic::error(
+                        ErrorCode::Eval,
+                        "division by zero",
+                        span,
+                    ))
+                })?;
+            let merged = MagOpResult {
+                mag: result.mag,
+                event: anchor.event.or(dst_factor.event).or(result.event),
             };
+            let mag = finalize_mag(merged, lints, span, "unit conversion")?;
             Ok(Quantity::new(mag, target.clone(), target_dim))
         }
     }
@@ -169,7 +152,7 @@ pub fn unify_add(
                 ),
                 span,
             )));
-            let rhs = convert_quantity(right, &left.unit, registry)?;
+            let rhs = convert_quantity(right, &left.unit, registry, lints, span)?;
             let mag = finalize_mag(left.mag.add(rhs.mag), lints, span, "addition")?;
             return Ok(Quantity {
                 mag,
@@ -185,7 +168,7 @@ pub fn unify_add(
         )));
     }
 
-    let rhs = convert_quantity(right, &left.unit, registry)?;
+    let rhs = convert_quantity(right, &left.unit, registry, lints, span)?;
     let mag = finalize_mag(left.mag.add(rhs.mag), lints, span, "addition")?;
     Ok(Quantity {
         mag,
@@ -214,7 +197,7 @@ pub fn unify_sub(
 
     if is_affine_unit_expr(&left.unit, registry) || is_affine_unit_expr(&right.unit, registry) {
         if affine_same_display_unit(&left.unit, &right.unit) {
-            let rhs = convert_quantity(right, &left.unit, registry)?;
+            let rhs = convert_quantity(right, &left.unit, registry, lints, span)?;
             let mag = finalize_mag(left.mag.sub(rhs.mag), lints, span, "subtraction")?;
             return Ok(Quantity {
                 mag,
@@ -236,7 +219,7 @@ pub fn unify_sub(
         return absolute_from_rankine(&diff, &left.unit, registry);
     }
 
-    let rhs = convert_quantity(right, &left.unit, registry)?;
+    let rhs = convert_quantity(right, &left.unit, registry, lints, span)?;
     let mag = finalize_mag(left.mag.sub(rhs.mag), lints, span, "subtraction")?;
     Ok(Quantity {
         mag,
@@ -392,31 +375,166 @@ fn non_finite(span: Span) -> Diag {
     ))
 }
 
-#[allow(clippy::arithmetic_side_effects)] // registry anchor factors; exact rational composition.
-fn unit_to_anchor_factor(unit: &UnitExpr, registry: &Registry) -> Result<Ratio<i128>, Diag> {
+fn apply_factor(mag: Mag, factor: MagOpResult) -> MagOpResult {
+    let mul = mag.mul(factor.mag);
+    MagOpResult {
+        mag: mul.mag,
+        event: factor.event.or(mul.event),
+    }
+}
+
+fn combine_mag_op(lhs: MagOpResult, rhs: MagOpResult) -> MagOpResult {
+    let mul = lhs.mag.mul(rhs.mag);
+    MagOpResult {
+        mag: mul.mag,
+        event: lhs.event.or(rhs.event).or(mul.event),
+    }
+}
+
+fn combine_mag_op_div(num: MagOpResult, den: MagOpResult) -> Result<MagOpResult, Diag> {
+    let div = num.mag.div(den.mag).map_err(|_| {
+        Diag::new(Diagnostic::error(
+            ErrorCode::Eval,
+            "zero anchor factor in unit expression",
+            Span::empty(0),
+        ))
+    })?;
+    Ok(MagOpResult {
+        mag: div.mag,
+        event: num.event.or(den.event).or(div.event),
+    })
+}
+
+fn unit_to_anchor_factor(unit: &UnitExpr, registry: &Registry) -> Result<MagOpResult, Diag> {
     match unit {
-        UnitExpr::Dimensionless => Ok(Ratio::one()),
+        UnitExpr::Dimensionless => Ok(MagOpResult {
+            mag: Mag::Exact(Ratio::one()),
+            event: None,
+        }),
         UnitExpr::Named(name) => registry
             .unit(name)
-            .map(|u| u.anchor_ratio)
+            .map(|u| MagOpResult {
+                mag: Mag::Exact(u.anchor_ratio),
+                event: None,
+            })
             .ok_or_else(|| unknown_unit(name, Span::empty(0))),
-        UnitExpr::Product(parts) => parts
-            .iter()
-            .try_fold(Ratio::one(), |acc, part| Ok(acc * unit_to_anchor_factor(part, registry)?)),
-        UnitExpr::Quotient(num, den) => Ok(
-            unit_to_anchor_factor(num, registry)? / unit_to_anchor_factor(den, registry)?,
+        UnitExpr::Product(parts) => parts.iter().try_fold(
+            MagOpResult {
+                mag: Mag::Exact(Ratio::one()),
+                event: None,
+            },
+            |acc, part| {
+                let part_factor = unit_to_anchor_factor(part, registry)?;
+                Ok(combine_mag_op(acc, part_factor))
+            },
         ),
+        UnitExpr::Quotient(num, den) => {
+            let num_factor = unit_to_anchor_factor(num, registry)?;
+            let den_factor = unit_to_anchor_factor(den, registry)?;
+            combine_mag_op_div(num_factor, den_factor)
+        }
         UnitExpr::Pow { base, exp } => {
-            let base_f = unit_to_anchor_factor(base, registry)?;
-            let factor = unit_exponent_factor_f64(exp)?;
-            let f = ratio_to_f64(base_f).powf(factor);
-            const SCALE: i128 = 1_000_000_000_000;
-            Ok(Ratio::new(
-                (f * SCALE as f64).round() as i128,
-                SCALE,
-            ))
+            let base_result = unit_to_anchor_factor(base, registry)?;
+            let exp_r = unit_exponent_to_ratio(exp)?;
+            pow_anchor_factor(base_result, exp_r)
         }
     }
+}
+
+fn pow_anchor_factor(base: MagOpResult, exp: Ratio<i32>) -> Result<MagOpResult, Diag> {
+    let base_event = base.event;
+    if *exp.denom() == 1 {
+        let e = *exp.numer();
+        let pow = match base.mag {
+            Mag::Exact(r) => {
+                let p = checked_ratio_pow(r, e);
+                MagOpResult {
+                    mag: p.mag,
+                    event: base_event.or(p.event),
+                }
+            }
+            Mag::Float(f) => MagOpResult {
+                mag: Mag::Float(f.powi(e)),
+                event: base_event,
+            },
+        };
+        return Ok(pow);
+    }
+    if *exp.denom() == 2 && (*exp.numer() == 1 || *exp.numer() == -1) {
+        let negate = *exp.numer() < 0;
+        let half = match base.mag {
+            Mag::Exact(r) => {
+                let r_for_sqrt = if negate {
+                    Ratio::one().checked_div(&r).ok_or_else(|| {
+                        Diag::new(Diagnostic::error(
+                            ErrorCode::Eval,
+                            "zero anchor factor in unit expression",
+                            Span::empty(0),
+                        ))
+                    })?
+                } else {
+                    r
+                };
+                if let Some(sqrt_r) = rational_sqrt(r_for_sqrt) {
+                    let mag = if negate {
+                        Mag::Exact(
+                            Ratio::one()
+                                .checked_div(&sqrt_r)
+                                .ok_or_else(|| {
+                                    Diag::new(Diagnostic::error(
+                                        ErrorCode::Eval,
+                                        "zero anchor factor in unit expression",
+                                        Span::empty(0),
+                                    ))
+                                })?,
+                        )
+                    } else {
+                        Mag::Exact(sqrt_r)
+                    };
+                    MagOpResult {
+                        mag,
+                        event: base_event,
+                    }
+                } else {
+                    let base_f = Mag::Exact(r).as_f64();
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let f = if negate {
+                        1.0 / base_f.sqrt()
+                    } else {
+                        base_f.sqrt()
+                    };
+                    MagOpResult {
+                        mag: Mag::Float(f),
+                        event: base_event.or(Some(TaintEvent::ExactnessLost)),
+                    }
+                }
+            }
+            Mag::Float(f) => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let out = if negate {
+                    1.0 / f.sqrt()
+                } else {
+                    f.sqrt()
+                };
+                MagOpResult {
+                    mag: Mag::Float(out),
+                    event: base_event,
+                }
+            }
+        };
+        return Ok(half);
+    }
+    let base_f = base.mag.as_f64();
+    #[allow(clippy::arithmetic_side_effects)]
+    let f = base_f.powf(ratio_i32_to_f64(exp));
+    Ok(MagOpResult {
+        mag: Mag::Float(f),
+        event: base_event.or(Some(TaintEvent::ExactnessLost)),
+    })
+}
+
+fn ratio_i32_to_f64(r: Ratio<i32>) -> f64 {
+    *r.numer() as f64 / *r.denom() as f64
 }
 
 fn unit_exponent_to_ratio(exp: &UnitExponent) -> Result<Ratio<i32>, Diag> {
@@ -445,29 +563,6 @@ fn unit_exponent_to_ratio(exp: &UnitExponent) -> Result<Ratio<i32>, Diag> {
                 )))
             }
         }
-    }
-}
-
-fn unit_exponent_factor_f64(exp: &UnitExponent) -> Result<f64, Diag> {
-    match exp {
-        UnitExponent::Int(n) => Ok(*n as f64),
-        UnitExponent::Ratio { num, den } => {
-            if *den == 0 {
-                return Err(Diag::new(Diagnostic::error(
-                    ErrorCode::Eval,
-                    "zero denominator in unit exponent",
-                    Span::empty(0),
-                )));
-            }
-            Ok(*num as f64 / *den as f64)
-        }
-        UnitExponent::Decimal(s) => s.parse().map_err(|_| {
-            Diag::new(Diagnostic::error(
-                ErrorCode::Eval,
-                "invalid decimal unit exponent",
-                Span::empty(0),
-            ))
-        }),
     }
 }
 
@@ -513,12 +608,6 @@ fn convert_affine(
     absolute_from_rankine(&rankine, target, registry)
 }
 
-fn ratio_to_f64(r: Ratio<i128>) -> f64 {
-    let n: f64 = num_traits::ToPrimitive::to_f64(r.numer()).unwrap_or(0.0);
-    let d: f64 = num_traits::ToPrimitive::to_f64(r.denom()).unwrap_or(1.0);
-    n / d
-}
-
 fn unknown_unit(name: &str, span: Span) -> Diag {
     Diag::new(Diagnostic::error(
         ErrorCode::UnknownUnit,
@@ -547,7 +636,14 @@ mod tests {
     fn convert_ft_to_in() {
         let reg = RegistryBuilder::from_seed().freeze();
         let q = Quantity::from_int(1, "ft", Dimension::single(BaseDim::Length, Ratio::one()));
-        let converted = convert_quantity(&q, &UnitExpr::named("in"), &reg).unwrap();
+        let converted = convert_quantity(
+            &q,
+            &UnitExpr::named("in"),
+            &reg,
+            &mut LintSink::new(),
+            Span::empty(0),
+        )
+        .unwrap();
         assert_eq!(converted.exact_ratio(), Some(Ratio::from_i32(12).unwrap()));
         assert_eq!(converted.unit.as_str(), "in");
     }

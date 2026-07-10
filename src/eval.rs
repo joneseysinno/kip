@@ -7,6 +7,7 @@ pub mod known;
 pub mod lint_sink;
 pub mod mag;
 pub mod partial;
+pub mod rational;
 pub mod units;
 pub mod value;
 

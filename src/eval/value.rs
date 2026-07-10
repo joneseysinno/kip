@@ -235,7 +235,14 @@ impl Quantity {
         unit: &UnitExpr,
         registry: &crate::Registry,
     ) -> Result<Quantity, Diag> {
-        crate::eval::units::convert_quantity(self, unit, registry)
+        let mut lints = crate::eval::lint_sink::LintSink::new();
+        crate::eval::units::convert_quantity(
+            self,
+            unit,
+            registry,
+            &mut lints,
+            crate::diag::Span::empty(0),
+        )
     }
 
     /// Format for display (M7).

@@ -9,6 +9,7 @@ use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::dim::{BaseDim, Dimension};
 use crate::eval::lint_sink::LintSink;
 use crate::eval::mag::{Mag, TaintEvent};
+use crate::eval::rational::rational_sqrt;
 use crate::eval::units::{convert_quantity, halve_dimension, mag_cmp};
 use crate::eval::value::{Quantity, SymUnaryOp, Value};
 use crate::quantity::{UnitExpr, UnitExponent};
@@ -31,7 +32,7 @@ pub fn eval_builtin(
                 q.dim.clone(),
             ))
         }, span),
-        "min" | "max" => eval_min_max(name, args, registry, span),
+        "min" | "max" => eval_min_max(name, args, registry, span, lints),
         "floor" | "ceil" | "round" => eval_rounding(name, args, span),
         "sin" | "cos" | "tan" => eval_trig(name, args, registry, span, lints),
         "asin" | "acos" | "atan" => eval_inverse_trig(name, args, registry, span, lints),
@@ -92,21 +93,13 @@ fn eval_sqrt(args: &[Value], span: Span, lints: &mut LintSink) -> Result<Value, 
     }
 }
 
-fn rational_sqrt(r: Ratio<i128>) -> Option<Ratio<i128>> {
-    let num = integer_sqrt(*r.numer())?;
-    let den = integer_sqrt(*r.denom())?;
-    Some(Ratio::new(num, den))
-}
-
-fn integer_sqrt(n: i128) -> Option<i128> {
-    if n < 0 {
-        return None;
-    }
-    let root = n.isqrt();
-    (root.checked_mul(root)? == n).then_some(root)
-}
-
-fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> Result<Value, Diag> {
+fn eval_min_max(
+    name: &str,
+    args: &[Value],
+    registry: &Registry,
+    span: Span,
+    lints: &mut LintSink,
+) -> Result<Value, Diag> {
     if args.len() < 2 {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
@@ -117,7 +110,7 @@ fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> 
     let mut acc = require_known_quantity(&args[0], span)?.clone();
     for arg in &args[1..] {
         let q = require_known_quantity(arg, span)?;
-        let rhs = convert_quantity(q, &acc.unit, registry)?;
+        let rhs = convert_quantity(q, &acc.unit, registry, lints, span)?;
         let pick_rhs = match mag_cmp(acc.mag, rhs.mag) {
             Some(Ordering::Greater) => name == "min",
             Some(Ordering::Less) => name == "max",
@@ -177,7 +170,7 @@ fn eval_trig(
     let q = require_quantity(args, 1, span)?;
     require_angle(&q.dim, span)?;
     let input_exact = q.is_exact();
-    let rad = to_radians(q, registry)?;
+    let rad = to_radians(q, registry, lints, span)?;
     if input_exact {
         lints.record_mag_event(
             TaintEvent::ExactnessLost,
@@ -336,11 +329,16 @@ fn require_angle(dim: &Dimension, span: Span) -> Result<(), Diag> {
     Ok(())
 }
 
-fn to_radians(q: &Quantity, registry: &Registry) -> Result<Quantity, Diag> {
+fn to_radians(
+    q: &Quantity,
+    registry: &Registry,
+    lints: &mut LintSink,
+    span: Span,
+) -> Result<Quantity, Diag> {
     if q.unit.as_str() == "rad" {
         return Ok(q.clone());
     }
-    q.convert_to(&UnitExpr::named("rad"), registry)
+    convert_quantity(q, &UnitExpr::named("rad"), registry, lints, span)
 }
 
 fn dimensionless_float(f: f64) -> Result<Quantity, Diag> {
