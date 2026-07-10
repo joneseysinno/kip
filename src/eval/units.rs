@@ -1,5 +1,7 @@
 //! Unit resolution, conversion, and leftmost-wins unification.
 
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::cmp::Ordering;
 
 use num_rational::Ratio;
@@ -37,14 +39,22 @@ pub fn dimension_of_unit(unit: &UnitExpr, registry: &Registry) -> Result<Dimensi
     }
 }
 
-/// Exact anchor magnitude for a quantity written in user units.
-pub fn magnitude_in_anchor_units(q: &Quantity, registry: &Registry) -> Result<Ratio<i128>, Diag> {
+/// Anchor-space magnitude (carries taint; never laundered to a bare `Ratio`).
+pub fn magnitude_in_anchor_units(q: &Quantity, registry: &Registry) -> Result<Mag, Diag> {
     let factor = unit_to_anchor_factor(&q.unit, registry)?;
     match q.mag {
-        Mag::Exact(r) => Ok(r * factor),
+        Mag::Exact(r) => {
+            let result = Mag::Exact(r).mul(Mag::Exact(factor));
+            // R0: events dropped at display boundary (no lint sink in fmt).
+            match result.mag {
+                Mag::Exact(m) => Ok(Mag::Exact(m)),
+                Mag::Float(f) => Mag::float(f).map_err(|_| non_finite(Span::empty(0))),
+            }
+        }
         Mag::Float(f) => {
+            #[allow(clippy::arithmetic_side_effects)] // tainted float anchor conversion.
             let anchor_f = f * ratio_to_f64(factor);
-            Ok(f64_to_ratio_approx(anchor_f))
+            Mag::float(anchor_f).map_err(|_| non_finite(Span::empty(0)))
         }
     }
 }
@@ -98,8 +108,35 @@ pub fn convert_quantity(
                     Span::empty(0),
                 )));
             }
-            let mag = anchor / target_factor;
-            Ok(Quantity::from_exact(mag, target.clone(), target_dim))
+            let mag = match anchor {
+                Mag::Exact(r) => {
+                    let result = Mag::Exact(r)
+                        .div(Mag::Exact(target_factor))
+                        .map_err(|_| {
+                            Diag::new(Diagnostic::error(
+                                ErrorCode::Eval,
+                                "division by zero",
+                                Span::empty(0),
+                            ))
+                        })?;
+                    result.mag
+                }
+                Mag::Float(f) => {
+                    let tf = ratio_to_f64(target_factor);
+                    if tf == 0.0 {
+                        return Err(Diag::new(Diagnostic::error(
+                            ErrorCode::Eval,
+                            "zero conversion factor",
+                            Span::empty(0),
+                        )));
+                    }
+                    // f64 path: input already tainted or overflowed to float upstream.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let mag_f = f / tf;
+                    Mag::float(mag_f).map_err(|_| non_finite(Span::empty(0)))?
+                }
+            };
+            Ok(Quantity::new(mag, target.clone(), target_dim))
         }
     }
 }
@@ -355,6 +392,7 @@ fn non_finite(span: Span) -> Diag {
     ))
 }
 
+#[allow(clippy::arithmetic_side_effects)] // registry anchor factors; exact rational composition.
 fn unit_to_anchor_factor(unit: &UnitExpr, registry: &Registry) -> Result<Ratio<i128>, Diag> {
     match unit {
         UnitExpr::Dimensionless => Ok(Ratio::one()),
@@ -371,7 +409,12 @@ fn unit_to_anchor_factor(unit: &UnitExpr, registry: &Registry) -> Result<Ratio<i
         UnitExpr::Pow { base, exp } => {
             let base_f = unit_to_anchor_factor(base, registry)?;
             let factor = unit_exponent_factor_f64(exp)?;
-            Ok(f64_to_ratio_approx(ratio_to_f64(base_f).powf(factor)))
+            let f = ratio_to_f64(base_f).powf(factor);
+            const SCALE: i128 = 1_000_000_000_000;
+            Ok(Ratio::new(
+                (f * SCALE as f64).round() as i128,
+                SCALE,
+            ))
         }
     }
 }
@@ -468,11 +511,6 @@ fn convert_affine(
     use crate::eval::affine::{absolute_from_rankine, to_rankine};
     let rankine = to_rankine(q, registry)?;
     absolute_from_rankine(&rankine, target, registry)
-}
-
-fn f64_to_ratio_approx(f: f64) -> Ratio<i128> {
-    const SCALE: i128 = 1_000_000_000_000;
-    Ratio::new((f * SCALE as f64).round() as i128, SCALE)
 }
 
 fn ratio_to_f64(r: Ratio<i128>) -> f64 {

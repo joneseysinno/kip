@@ -85,14 +85,7 @@ fn format_length_ft_in(
         }
     }
     let anchor = magnitude_in_anchor_units(&in_q, registry)?;
-    let total = match in_q.mag {
-        Mag::Float(f) => f,
-        Mag::Exact(_) => {
-            let n: f64 = num_traits::ToPrimitive::to_f64(anchor.numer()).unwrap_or(0.0);
-            let d: f64 = num_traits::ToPrimitive::to_f64(anchor.denom()).unwrap_or(1.0);
-            n / d
-        }
-    };
+    let total = anchor.as_f64();
     Ok(ftin::render_inches(total, opts.ft_in_denominator))
 }
 

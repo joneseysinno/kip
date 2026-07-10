@@ -1,4 +1,6 @@
-//! Built-in functions with dimension semantics (M4).
+#![deny(clippy::arithmetic_side_effects)]
+
+use std::cmp::Ordering;
 
 use num_rational::Ratio;
 use num_traits::ToPrimitive;
@@ -7,7 +9,7 @@ use crate::diag::{Diag, Diagnostic, ErrorCode, Span};
 use crate::dim::{BaseDim, Dimension};
 use crate::eval::lint_sink::LintSink;
 use crate::eval::mag::{Mag, TaintEvent};
-use crate::eval::units::{convert_quantity, halve_dimension};
+use crate::eval::units::{convert_quantity, halve_dimension, mag_cmp};
 use crate::eval::value::{Quantity, SymUnaryOp, Value};
 use crate::quantity::{UnitExpr, UnitExponent};
 use crate::registry::Registry;
@@ -31,9 +33,9 @@ pub fn eval_builtin(
         }, span),
         "min" | "max" => eval_min_max(name, args, registry, span),
         "floor" | "ceil" | "round" => eval_rounding(name, args, span),
-        "sin" | "cos" | "tan" => eval_trig(name, args, registry, span),
-        "asin" | "acos" | "atan" => eval_inverse_trig(name, args, registry, span),
-        "atan2" => eval_atan2(args, registry, span),
+        "sin" | "cos" | "tan" => eval_trig(name, args, registry, span, lints),
+        "asin" | "acos" | "atan" => eval_inverse_trig(name, args, registry, span, lints),
+        "atan2" => eval_atan2(args, registry, span, lints),
         "ln" | "log10" | "exp" => eval_transcendental(name, args, span, lints),
         _ => Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
@@ -100,15 +102,8 @@ fn integer_sqrt(n: i128) -> Option<i128> {
     if n < 0 {
         return None;
     }
-    if n == 0 {
-        return Some(0);
-    }
-    let root = (n as f64).sqrt().round() as i128;
-    if root * root == n {
-        Some(root)
-    } else {
-        None
-    }
+    let root = n.isqrt();
+    (root.checked_mul(root)? == n).then_some(root)
 }
 
 fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> Result<Value, Diag> {
@@ -123,10 +118,17 @@ fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> 
     for arg in &args[1..] {
         let q = require_known_quantity(arg, span)?;
         let rhs = convert_quantity(q, &acc.unit, registry)?;
-        let pick_rhs = match name {
-            "min" => rhs.as_f64() < acc.as_f64(),
-            "max" => rhs.as_f64() > acc.as_f64(),
-            _ => unreachable!(),
+        let pick_rhs = match mag_cmp(acc.mag, rhs.mag) {
+            Some(Ordering::Greater) => name == "min",
+            Some(Ordering::Less) => name == "max",
+            Some(Ordering::Equal) => false,
+            None => {
+                return Err(Diag::new(Diagnostic::error(
+                    ErrorCode::Eval,
+                    "non-comparable magnitudes in min/max",
+                    span,
+                )));
+            }
         };
         if pick_rhs {
             acc = rhs;
@@ -135,16 +137,34 @@ fn eval_min_max(name: &str, args: &[Value], registry: &Registry, span: Span) -> 
     Ok(Value::Known(acc))
 }
 
+/// Rounds half away from zero (matches `f64::round` on the float path).
 fn eval_rounding(name: &str, args: &[Value], span: Span) -> Result<Value, Diag> {
     let q = require_quantity(args, 1, span)?;
-    let f = q.as_f64();
-    let rounded = match name {
-        "floor" => f.floor(),
-        "ceil" => f.ceil(),
-        "round" => f.round(),
-        _ => unreachable!(),
+    let mag = match q.mag {
+        Mag::Exact(r) => {
+            let rounded = match name {
+                "floor" => r.floor(),
+                "ceil" => r.ceil(),
+                "round" => r.round(),
+                _ => unreachable!(),
+            };
+            Mag::Exact(rounded)
+        }
+        Mag::Float(f) => {
+            let rounded = match name {
+                "floor" => f.floor(),
+                "ceil" => f.ceil(),
+                "round" => f.round(),
+                _ => unreachable!(),
+            };
+            Mag::float(rounded).map_err(|_| non_finite(span))?
+        }
     };
-    Ok(Value::Known(float_quantity(q, rounded)?))
+    Ok(Value::Known(Quantity::new(
+        mag,
+        q.unit.clone(),
+        q.dim.clone(),
+    )))
 }
 
 fn eval_trig(
@@ -152,10 +172,19 @@ fn eval_trig(
     args: &[Value],
     registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     let q = require_quantity(args, 1, span)?;
     require_angle(&q.dim, span)?;
+    let input_exact = q.is_exact();
     let rad = to_radians(q, registry)?;
+    if input_exact {
+        lints.record_mag_event(
+            TaintEvent::ExactnessLost,
+            span,
+            format!("`{name}` produced an inexact result"),
+        );
+    }
     let f = rad.as_f64();
     let out = match name {
         "sin" => f.sin(),
@@ -171,9 +200,11 @@ fn eval_inverse_trig(
     args: &[Value],
     _registry: &Registry,
     span: Span,
+    lints: &mut LintSink,
 ) -> Result<Value, Diag> {
     let q = require_quantity(args, 1, span)?;
     require_dimensionless(&q.dim, span)?;
+    let input_exact = q.is_exact();
     let x = q.as_f64();
     let rad = match name {
         "asin" => x.asin(),
@@ -181,6 +212,13 @@ fn eval_inverse_trig(
         "atan" => x.atan(),
         _ => unreachable!(),
     };
+    if input_exact {
+        lints.record_mag_event(
+            TaintEvent::ExactnessLost,
+            span,
+            format!("`{name}` produced an inexact result"),
+        );
+    }
     Ok(Value::Known(Quantity::from_float(
         rad.to_degrees(),
         UnitExpr::named("deg"),
@@ -188,7 +226,12 @@ fn eval_inverse_trig(
     ).map_err(|_| non_finite(span))?))
 }
 
-fn eval_atan2(args: &[Value], _registry: &Registry, span: Span) -> Result<Value, Diag> {
+fn eval_atan2(
+    args: &[Value],
+    _registry: &Registry,
+    span: Span,
+    lints: &mut LintSink,
+) -> Result<Value, Diag> {
     if args.len() != 2 {
         return Err(Diag::new(Diagnostic::error(
             ErrorCode::Eval,
@@ -200,6 +243,13 @@ fn eval_atan2(args: &[Value], _registry: &Registry, span: Span) -> Result<Value,
     let x = require_known_quantity(&args[1], span)?;
     require_dimensionless(&y.dim, span)?;
     require_dimensionless(&x.dim, span)?;
+    if y.is_exact() && x.is_exact() {
+        lints.record_mag_event(
+            TaintEvent::ExactnessLost,
+            span,
+            "`atan2` produced an inexact result",
+        );
+    }
     let rad = y.as_f64().atan2(x.as_f64());
     Ok(Value::Known(Quantity::from_float(
         rad.to_degrees(),
@@ -291,14 +341,6 @@ fn to_radians(q: &Quantity, registry: &Registry) -> Result<Quantity, Diag> {
         return Ok(q.clone());
     }
     q.convert_to(&UnitExpr::named("rad"), registry)
-}
-
-fn float_quantity(base: &Quantity, f: f64) -> Result<Quantity, Diag> {
-    Ok(Quantity::new(
-        Mag::float(f).map_err(|_| non_finite(Span::empty(0)))?,
-        base.unit.clone(),
-        base.dim.clone(),
-    ))
 }
 
 fn dimensionless_float(f: f64) -> Result<Quantity, Diag> {

@@ -1,10 +1,12 @@
 //! Evaluate a code-equation call (`ACI.fr(fc: …, lambda: …)`).
 
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::diag::{Diag, Diagnostic, ErrorCode, Hint, LintCode, Span};
+use crate::diag::{suggest_similar, Diag, Diagnostic, ErrorCode, Hint, LintCode, Span};
 use crate::eval::known::eval_known_checked;
 use crate::eval::lint_sink::LintSink;
 use crate::eval::partial::finalize;
@@ -49,11 +51,18 @@ pub fn eval_equation_call(
     for arg in args {
         if let CallArg::Named { name, .. } = arg {
             if !eq.args.contains_key(name) {
-                return Err(Diag::new(Diagnostic::error(
+                let candidates: Vec<&str> = eq.args.keys().map(String::as_str).collect();
+                let mut diag = Diagnostic::error(
                     ErrorCode::Eval,
                     format!("unknown argument `{name}` for equation `{}`", eq.path_key),
                     span,
-                )));
+                );
+                if let Some(hint) = suggest_similar(name, candidates, 3) {
+                    diag = diag.with_hints(vec![Hint::Note(format!(
+                        "did you mean `{hint}`?"
+                    ))]);
+                }
+                return Err(Diag::new(diag));
             }
         }
     }
@@ -145,8 +154,7 @@ fn prepare_arg(
                     ]),
                 ));
             }
-            check_range(q, contract, eq, registry, span, lints)?;
-            let converted = convert_quantity(q, &contract.unit, registry)?;
+            let converted = check_range(q, contract, eq, registry, span, lints)?;
             Ok(Value::Known(converted))
         }
         Value::Symbolic(s) => {
@@ -165,11 +173,11 @@ fn check_range(
     registry: &Registry,
     span: Span,
     lints: &mut LintSink,
-) -> Result<(), Diag> {
-    let Some(range) = &contract.range else {
-        return Ok(());
-    };
+) -> Result<Quantity, Diag> {
     let in_contract = convert_quantity(q, &contract.unit, registry)?;
+    let Some(range) = &contract.range else {
+        return Ok(in_contract);
+    };
     let mag = in_contract.mag;
     let below = range
         .min
@@ -189,7 +197,7 @@ fn check_range(
         }
         lints.push(Diag::new(Diagnostic::lint(LintCode::Range, msg, span)));
     }
-    Ok(())
+    Ok(in_contract)
 }
 
 fn eval_with_bindings(

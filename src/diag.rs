@@ -244,3 +244,42 @@ impl fmt::Display for Diag {
 }
 
 impl std::error::Error for Diag {}
+
+/// Levenshtein distance between two strings.
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    if a.len() < b.len() {
+        return levenshtein(b, a);
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut curr = vec![i + 1];
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr.push(
+                (prev[j + 1] + 1)
+                    .min(curr[j] + 1)
+                    .min(prev[j] + cost),
+            );
+        }
+        prev = curr;
+    }
+    prev[b.len()]
+}
+
+/// Closest candidate within `max_distance`, if any.
+pub fn suggest_similar<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    max_distance: usize,
+) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .filter(|c| *c != name)
+        .map(|c| (c, levenshtein(name, c)))
+        .filter(|(_, d)| *d <= max_distance)
+        .min_by_key(|(_, d)| *d)
+        .map(|(c, _)| c)
+}

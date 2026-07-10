@@ -1,5 +1,7 @@
 //! Magnitude representation: exact rational or float after taint.
 
+#![allow(clippy::arithmetic_side_effects)] // Mag ops centralize checked rational/f64 arithmetic.
+
 #![allow(clippy::should_implement_trait)]
 
 use std::cmp::Ordering;
