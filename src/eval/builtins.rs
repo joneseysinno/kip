@@ -10,6 +10,7 @@ use crate::dim::{BaseDim, Dimension};
 use crate::eval::lint_sink::LintSink;
 use crate::eval::mag::{Mag, TaintEvent};
 use crate::eval::rational::rational_sqrt;
+use crate::eval::unit_simplify::simplify_unit_expr;
 use crate::eval::units::{convert_quantity, halve_dimension, mag_cmp};
 use crate::eval::value::{Quantity, SymUnaryOp, Value};
 use crate::quantity::{UnitExpr, UnitExponent};
@@ -64,10 +65,10 @@ fn eval_sqrt(args: &[Value], span: Span, lints: &mut LintSink) -> Result<Value, 
                 )));
             }
             let dim = halve_dimension(&q.dim)?;
-            let unit = UnitExpr::Pow {
+            let unit = simplify_unit_expr(&UnitExpr::Pow {
                 base: Box::new(q.unit.clone()),
                 exp: UnitExponent::Ratio { num: 1, den: 2 },
-            };
+            });
             let mag = match q.mag {
                 Mag::Exact(r) => {
                     if let Some(root) = rational_sqrt(r) {

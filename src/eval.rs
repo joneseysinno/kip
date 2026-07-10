@@ -8,6 +8,7 @@ pub mod lint_sink;
 pub mod mag;
 pub mod partial;
 pub mod rational;
+pub mod unit_simplify;
 pub mod units;
 pub mod value;
 

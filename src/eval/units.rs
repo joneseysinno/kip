@@ -12,6 +12,7 @@ use crate::dim::Dimension;
 use crate::eval::lint_sink::LintSink;
 use crate::eval::mag::{Mag, MagOpResult, TaintEvent};
 use crate::eval::rational::{checked_ratio_pow, rational_sqrt};
+use crate::eval::unit_simplify::simplify_unit_expr;
 use crate::eval::value::Quantity;
 use crate::quantity::{UnitExpr, UnitExponent};
 use crate::registry::Registry;
@@ -236,7 +237,7 @@ pub fn combine_mul(
     span: Span,
     lints: &mut LintSink,
 ) -> Result<Quantity, Diag> {
-    let unit = compose_unit_expr(&left.unit, &right.unit, true);
+    let unit = simplify_unit_expr(&compose_unit_expr(&left.unit, &right.unit, true));
     let dim = left.dim.mul(&right.dim);
     let mag = finalize_mag(left.mag.mul(right.mag), lints, span, "multiplication")?;
     Ok(Quantity {
@@ -261,7 +262,7 @@ pub fn combine_div(
             span,
         )));
     }
-    let unit = compose_unit_expr(&left.unit, &right.unit, false);
+    let unit = simplify_unit_expr(&compose_unit_expr(&left.unit, &right.unit, false));
     let dim = left.dim.div(&right.dim);
     let result = left
         .mag
@@ -293,7 +294,7 @@ pub fn combine_pow(
     let e = ratio_to_i32_from_mag(exp.mag, span)?;
     let dim = left.dim.pow(Ratio::from_integer(e));
     let mag = finalize_mag(left.mag.pow_int(e), lints, span, "exponentiation")?;
-    let unit = if e == 1 {
+    let raw_unit = if e == 1 {
         left.unit.clone()
     } else if e == 0 {
         UnitExpr::one()
@@ -303,6 +304,7 @@ pub fn combine_pow(
             exp: UnitExponent::Int(e),
         }
     };
+    let unit = simplify_unit_expr(&raw_unit);
     Ok(Quantity {
         mag,
         unit,
