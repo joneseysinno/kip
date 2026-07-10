@@ -28,5 +28,5 @@ First public release. All milestones M0–M8 complete.
 
 - `cargo test --all-features`, clippy `-D warnings`, Miri, loom models, fuzz smoke, bench compile.
 
-[Unreleased]: https://github.com/kip-rs/kip/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/kip-rs/kip/releases/tag/v0.1.0
+[Unreleased]: https://github.com/joneseysinno/kip/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/joneseysinno/kip/releases/tag/v0.1.0
